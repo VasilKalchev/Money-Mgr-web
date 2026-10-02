@@ -1,12 +1,14 @@
-"""gdrive.py with `requests` faked out; nothing here touches the network."""
-import os
-import sqlite3
+"""gdrive.py with `requests` faked out; nothing here touches the network.
+Syncing itself is tested in test_sync.py."""
+import hashlib
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import requests
 
 import dbstore
 import gdrive
+from fakedrive import FakeDrive
 from gdrive import GDriveError
 
 
@@ -83,7 +85,15 @@ def test_auth_url(connected):
     assert url.startswith(gdrive.AUTH_URL + "?")
     for part in ("client_id=cid", "state=st", "access_type=offline", "prompt=consent", "response_type=code"):
         assert part in url
-    assert "drive.readonly" in url and "localhost%3A5732%2Fcb" in url
+    assert parse_qs(urlsplit(url).query)["scope"] == [gdrive.SCOPE_WRITE]
+    assert "localhost%3A5732%2Fcb" in url
+
+
+def test_auth_url_read_only_when_writing_is_off(store):
+    gdrive.save_credentials(store, "cid", "secret", "", write=False)
+    assert not gdrive.wants_write(store)
+    url = gdrive.auth_url(store, "http://localhost/cb", "st")
+    assert parse_qs(urlsplit(url).query)["scope"] == [gdrive.SCOPE_READ]
 
 
 @pytest.mark.parametrize("pasted, expected", [
@@ -116,6 +126,23 @@ def test_exchange_code_saves_refresh_token(store, monkeypatch):
     assert sent["grant_type"] == "authorization_code" and sent["code"] == "the-code"
     assert gdrive.is_connected(store)
     assert gdrive._tokens[store.root]["value"] == "at"
+
+
+@pytest.mark.parametrize("granted, writable", [(gdrive.SCOPE_WRITE, True), (gdrive.SCOPE_READ, False), (None, False)])
+def test_granted_scope_decides_writing(store, monkeypatch, granted, writable):
+    gdrive.save_credentials(store, "cid", "secret", "")
+    body = {"access_token": "at", "refresh_token": "rt", **({"scope": granted} if granted else {})}
+    monkeypatch.setattr(gdrive.requests, "post", lambda *a, **k: Resp(200, body))
+    gdrive.exchange_code(store, "c", "http://localhost/cb")
+    assert gdrive.can_write(store) is writable
+
+
+def test_resaving_same_client_keeps_granted_scope(connected):
+    connected.save_config({"gdrive": {**gdrive.settings(connected), "scope": gdrive.SCOPE_WRITE}})
+    gdrive.save_credentials(connected, "cid", "", "Other")
+    assert gdrive.can_write(connected)
+    gdrive.save_credentials(connected, "other", "s2", "")
+    assert not gdrive.can_write(connected)
 
 
 def test_exchange_code_without_refresh_token(store, monkeypatch):
@@ -243,80 +270,37 @@ def test_check_connection_counts_snapshots(connected, drive):
     assert gdrive.check_connection(connected) == 2
 
 
-# -- sync -------------------------------------------------------------------------
+# -- writing ----------------------------------------------------------------------
 
-@pytest.fixture
-def remote(drive, mmbak_file):
-    """Drive holding one valid snapshot; returns it and registers its bytes."""
-    data = open(mmbak_file, "rb").read()
-    md5 = dbstore.file_md5(mmbak_file)
-    drive.files["1"] = data
-    drive.pages = [{"files": [snap("1", "MM_20250101.mmbak", md5)]}] * 5
-    drive.md5 = md5
-    return drive
-
-
-def test_sync_installs_newest(connected, remote):
-    assert gdrive.sync(connected) == ("installed", "MM_20250101.mmbak")
-    info = connected.db_info()
-    assert connected.db_exists() and connected.load_config()["db_source"] == "gdrive"
-    assert (info["remote_id"], info["remote_md5"]) == ("1", remote.md5)
-    assert dbstore.file_md5(connected.db_path) == remote.md5
+def test_upload_replaces_content_and_keeps_name(connected, monkeypatch, tmp_path):
+    fake = FakeDrive(monkeypatch, connected)
+    meta = fake.add("f1", "MMGF(1-2-26-101010).mmbak", b"old content")
+    new = tmp_path / "new.mmbak"
+    new.write_bytes(b"x" * (6 * 1024 * 1024))  # over the 5 MB simple-upload limit
+    after = gdrive.upload(connected, meta, str(new))
+    assert fake.data("f1") == new.read_bytes()
+    assert after["name"] == "MMGF(1-2-26-101010).mmbak" and after["id"] == "f1"
+    assert after["md5Checksum"] == dbstore.file_md5(str(new))
+    assert [r[0] for r in fake.requests] == ["PATCH", "PUT", "GET"]
 
 
-def test_sync_up_to_date_does_nothing(connected, remote):
-    gdrive.sync(connected)
-    assert gdrive.sync(connected) == ("up_to_date", "MM_20250101.mmbak")
-    assert connected.backup_count() == 0
+def test_upload_errors(connected, monkeypatch, tmp_path):
+    fake = FakeDrive(monkeypatch, connected)
+    path = tmp_path / "x.mmbak"
+    path.write_bytes(b"x")
+    with pytest.raises(GDriveError, match="404"):
+        gdrive.upload(connected, {"id": "missing", "name": "MM.mmbak"}, str(path))
+    monkeypatch.setattr(gdrive.requests, "patch",
+                        lambda *a, **k: Resp(403, {"error": {"message": "Request had insufficient authentication scopes."}}))
+    fake.add("f1", "MM_a.mmbak", b"old")
+    with pytest.raises(GDriveError, match="insufficient"):
+        gdrive.upload(connected, fake.meta("f1"), str(path))
+    assert fake.data("f1") == b"old"
 
 
-def test_sync_new_snapshot_replaces_and_backs_up(connected, remote, make_mmbak):
-    gdrive.sync(connected)
-    newer = make_mmbak()
-    c = sqlite3.connect(newer)
-    c.execute("UPDATE INOUTCOME SET ZCONTENT = 'newer' WHERE uid = 't1'")
-    c.commit()
-    c.close()
-    remote.files["2"] = open(newer, "rb").read()
-    remote.pages = [{"files": [snap("2", "MM_20250202.mmbak", dbstore.file_md5(newer))]}] * 5
-    assert gdrive.sync(connected)[0] == "installed"
-    assert connected.backup_count() == 1
-
-
-def test_sync_refuses_to_clobber_local_edits(connected, remote, make_mmbak):
-    gdrive.sync(connected)
-    c = sqlite3.connect(connected.db_path)
-    c.execute("UPDATE INOUTCOME SET ZCONTENT = 'mine' WHERE uid = 't1'")
-    c.commit()
-    c.close()
-    newer = make_mmbak()
-    remote.files["2"] = open(newer, "rb").read()
-    remote.pages = [{"files": [snap("2", "MM_new.mmbak", dbstore.file_md5(newer))]}] * 5
-    md5 = dbstore.file_md5(connected.db_path)
-    assert gdrive.sync(connected) == ("local_modified", "MM_new.mmbak")
-    assert dbstore.file_md5(connected.db_path) == md5
-    assert gdrive.sync(connected, overwrite=True)[0] == "installed"
-    assert connected.backup_count() == 1  # the edited db was backed up first
-
-
-def test_sync_no_snapshots(connected, drive):
-    drive.pages = [{"files": []}]
-    with pytest.raises(GDriveError, match="No MM"):
-        gdrive.sync(connected)
-
-
-def test_sync_checksum_mismatch_installs_nothing(connected, remote):
-    remote.pages = [{"files": [snap("1", "MM_bad.mmbak", "0" * 32)]}] * 5
-    with pytest.raises(GDriveError, match="corrupted"):
-        gdrive.sync(connected)
-    assert not connected.db_exists()
-    assert not os.listdir(connected.db_dir)  # staged file removed
-
-
-def test_sync_unsupported_version_is_refused(connected, remote, make_mmbak):
-    bad = make_mmbak(18)
-    remote.files["1"] = open(bad, "rb").read()
-    remote.pages = [{"files": [snap("1", "MM_old.mmbak", dbstore.file_md5(bad))]}] * 5
-    with pytest.raises(dbstore.UnsupportedDatabase):
-        gdrive.sync(connected)
-    assert not connected.db_exists()
+def test_file_meta(connected, monkeypatch):
+    fake = FakeDrive(monkeypatch, connected)
+    fake.add("f1", "MM_a.mmbak", b"abc")
+    assert gdrive.file_meta(connected, "f1")["md5Checksum"] == hashlib.md5(b"abc").hexdigest()
+    with pytest.raises(GDriveError, match="404"):
+        gdrive.file_meta(connected, "nope")

@@ -11,7 +11,14 @@ Everything lives under DATA_DIR (the docker volume, /config in the image):
     users/<name>/backups/<stamp>/
                                  a copy of the working db + diff.txt, taken
                                  before the first write after startup and
-                                 before a replacement overwrites it
+                                 before a replacement overwrites it (plus
+                                 incoming.mmbak, the app's snapshot, when a
+                                 sync merge replaced it)
+    users/<name>/sync/           sync state (see dbsync.py): base.mmbak, the
+                                 last snapshot taken from the app; pushed/,
+                                 states handed back to it since; and
+                                 incoming.mmbak + pending.json while a merge
+                                 waits for review
 
 Installs from before multi-user support kept config.json, db/ and backups/
 directly in DATA_DIR; adopt_legacy_data() moves them to the first user.
@@ -44,6 +51,11 @@ BACKUP_DEFAULTS = {
 # else is refused rather than risk wrong joins or malformed writes - add a
 # version here only after checking its schema against the notes.
 SUPPORTED_USER_VERSIONS = {19}
+
+# States handed back to the app (uploaded to Drive or downloaded) kept as
+# candidate bases for the next sync; see Store.base_candidates().
+PUSHED_KEEP = 3
+INCOMING_NAME = "incoming.mmbak"
 
 _app_lock = threading.RLock()
 
@@ -143,6 +155,32 @@ def file_md5(path):
     return h.hexdigest()
 
 
+def copy_db(src, dest):
+    """Copy a SQLite database with the online backup API, so the copy is
+    consistent even if src is being written."""
+    src_con = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    dst_con = sqlite3.connect(dest)
+    try:
+        src_con.backup(dst_con)
+    finally:
+        dst_con.close()
+        src_con.close()
+
+
+def _copy_atomic(src, dest):
+    """Copy a file to dest through a temp file next to it, so dest is never
+    half-written."""
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest), suffix=".part")
+    os.close(fd)
+    try:
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dest)
+    except BaseException:
+        os.remove(tmp)
+        raise
+
+
 def _dump_lines(db_path):
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
@@ -167,6 +205,11 @@ class Store:
         self.db_dir = os.path.join(root, "db")
         self.db_path = os.path.join(self.db_dir, "current.mmbak")
         self.backup_dir = os.path.join(root, "backups")
+        self.sync_dir = os.path.join(root, "sync")
+        self.base_path = os.path.join(self.sync_dir, "base.mmbak")
+        self.pushed_dir = os.path.join(self.sync_dir, "pushed")
+        self.incoming_path = os.path.join(self.sync_dir, INCOMING_NAME)
+        self.pending_path = os.path.join(self.sync_dir, "pending.json")
         self._lock = threading.RLock()
         self._backed_up = False
 
@@ -196,45 +239,146 @@ class Store:
         os.close(fd)
         return path
 
+    def _swap_in(self, staged):
+        for suffix in ("-journal", "-wal", "-shm"):
+            try:
+                os.remove(self.db_path + suffix)
+            except FileNotFoundError:
+                pass
+        os.replace(staged, self.db_path)
+        self._backed_up = False
+
     def install_db(self, staged, source, name, **extra):
         """Validate the staged file and make it the working database, backing
         up the one it replaces. `source` is "manual" or "gdrive"; `name` is
         the original file name, shown in the UI. Extra keyword args (e.g. the
-        Drive file id/md5) are stored with the provenance. The staged file is
-        consumed either way. Raises UnsupportedDatabase if it isn't usable."""
+        Drive file id/md5) are stored with the provenance. The file also
+        becomes the sync base (it's what the app has), and a pending sync
+        is dropped. The staged file is consumed either way. Raises
+        UnsupportedDatabase if it isn't usable."""
         try:
             check_db_supported(staged)
             with self._lock:
                 if self.db_exists():
                     self.backup()
-                for suffix in ("-journal", "-wal", "-shm"):
-                    try:
-                        os.remove(self.db_path + suffix)
-                    except FileNotFoundError:
-                        pass
                 md5 = file_md5(staged)
-                os.replace(staged, self.db_path)
+                self.set_base(staged)
+                self._swap_in(staged)
+                now = datetime.now().isoformat(timespec="seconds")
                 self.save_config({
                     "db_source": source,
                     "db_info": {
                         "name": os.path.basename(name),
-                        "installed_at": datetime.now().isoformat(timespec="seconds"),
+                        "installed_at": now,
+                        "synced_at": now,
                         "installed_md5": md5,
                         **extra,
                     },
                 })
-                self._backed_up = False
+                self.clear_pending()
         finally:
             if os.path.exists(staged):
                 os.remove(staged)
 
+    def install_merged(self, merged, incoming, source, name, **extra):
+        """Make a sync's merged database the working one. The one it replaces
+        is backed up with the incoming snapshot alongside, and `incoming`
+        becomes the new sync base. Until it's handed back to the app, the
+        working db has changes the app lacks ("unsynced"). Consumes
+        `merged`; `incoming` is left for the caller."""
+        try:
+            check_db_supported(merged)
+            with self._lock:
+                self.backup(extra={INCOMING_NAME: incoming})
+                md5 = file_md5(merged)
+                self.set_base(incoming)
+                self._swap_in(merged)
+                now = datetime.now().isoformat(timespec="seconds")
+                self.save_config({
+                    "db_source": source,
+                    "db_info": {
+                        "name": os.path.basename(name),
+                        "installed_at": now,
+                        "synced_at": now,
+                        "installed_md5": md5,
+                        "unsynced": True,
+                        **extra,
+                    },
+                })
+        finally:
+            if os.path.exists(merged):
+                os.remove(merged)
+
     def db_info(self):
         return self.load_config().get("db_info") or {}
 
+    def update_db_info(self, **fields):
+        with self._lock:
+            self.save_config({"db_info": {**self.db_info(), **fields}})
+
     def local_modified(self):
-        """True when the working db has been edited since it was installed."""
+        """True when the working db has been edited since it was installed
+        or last synced."""
         md5 = self.db_info().get("installed_md5")
         return bool(md5) and self.db_exists() and file_md5(self.db_path) != md5
+
+    def unsynced(self):
+        """True when the working db has changes the app (for a Drive sync:
+        the file on Drive) doesn't have yet."""
+        return bool(self.db_info().get("unsynced")) or self.local_modified()
+
+    # -- sync state (see dbsync.py) -------------------------------------------
+
+    def set_base(self, src):
+        """Record src as the snapshot this db and the app last had in
+        common, and forget the states handed back to the app before it."""
+        with self._lock:
+            _copy_atomic(src, self.base_path)
+            shutil.rmtree(self.pushed_dir, ignore_errors=True)
+
+    def add_pushed(self, src):
+        """Remember src as a state handed back to the app (uploaded to Drive
+        or downloaded), which its next backup may descend from."""
+        with self._lock:
+            name = datetime.now().strftime("%Y%m%d_%H%M%S_%f") + ".mmbak"
+            _copy_atomic(src, os.path.join(self.pushed_dir, name))
+            for old in self._pushed()[PUSHED_KEEP:]:
+                os.remove(old)
+
+    def _pushed(self):
+        if not os.path.isdir(self.pushed_dir):
+            return []
+        names = sorted((n for n in os.listdir(self.pushed_dir) if n.endswith(".mmbak")), reverse=True)
+        return [os.path.join(self.pushed_dir, n) for n in names]
+
+    def base_candidates(self):
+        """Snapshots the app's next backup may descend from, safest first:
+        the last one taken from the app, then states handed back to it,
+        newest first."""
+        return ([self.base_path] if os.path.isfile(self.base_path) else []) + self._pushed()
+
+    def load_pending(self):
+        """The sync waiting for review ({source, name, remote, started_at}),
+        or None."""
+        if not os.path.isfile(self.incoming_path):
+            return None
+        return _load_json(self.pending_path) or None
+
+    def save_pending(self, staged, info):
+        """Park a staged incoming snapshot until its merge is reviewed
+        (replacing any earlier one)."""
+        with self._lock:
+            os.makedirs(self.sync_dir, exist_ok=True)
+            os.replace(staged, self.incoming_path)
+            _save_json(self.pending_path, {**info, "started_at": datetime.now().isoformat(timespec="seconds")})
+
+    def clear_pending(self):
+        with self._lock:
+            for path in (self.pending_path, self.incoming_path):
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
 
     # -- backups -------------------------------------------------------------
 
@@ -256,7 +400,10 @@ class Store:
         backup, so it's easy to see what changed without per-query logging."""
         prev_db = None
         if prev_dir:
-            prev_db = next((os.path.join(prev_dir, f) for f in os.listdir(prev_dir) if f.endswith(".mmbak")), None)
+            names = sorted(f for f in os.listdir(prev_dir) if f.endswith(".mmbak") and f != INCOMING_NAME)
+            own = os.path.basename(self.db_path)
+            if names:
+                prev_db = os.path.join(prev_dir, own if own in names else names[0])
         if prev_db is None:
             text = "Initial backup: no prior snapshot to diff against.\n"
         else:
@@ -278,11 +425,12 @@ class Store:
         for old in folders[:-keep] if keep > 0 else []:
             shutil.rmtree(os.path.join(self.backup_dir, old), ignore_errors=True)
 
-    def backup(self):
+    def backup(self, extra=None):
         """Snapshot the working db into backups/<stamp>/ (with a diff.txt
         against the previous snapshot, unless turned off in settings);
         returns the new folder. Uses SQLite's online backup API so the copy
-        is consistent even if the file is open elsewhere."""
+        is consistent even if the file is open elsewhere. `extra`
+        ({file name: path}) is copied in alongside."""
         with self._lock:
             folders = self._backup_folders()
             prev_dir = os.path.join(self.backup_dir, folders[-1]) if folders else None
@@ -295,13 +443,9 @@ class Store:
             os.makedirs(archive_dir)
 
             dest = os.path.join(archive_dir, os.path.basename(self.db_path))
-            src_con = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
-            dst_con = sqlite3.connect(dest)
-            try:
-                src_con.backup(dst_con)
-            finally:
-                dst_con.close()
-                src_con.close()
+            copy_db(self.db_path, dest)
+            for name, path in (extra or {}).items():
+                shutil.copyfile(path, os.path.join(archive_dir, name))
             if self.backup_settings()["diff"]:
                 self._write_diff(os.path.join(archive_dir, "diff.txt"), prev_dir, dest)
             self._prune_backups()

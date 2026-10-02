@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+{% block title %}Review sync{% endblock %}
+{% macro tx_cells(t, differs=()) -%}
+  <td class="nowrap {{ 'diff-cell' if 'date' in differs or 'time' in differs }}">{{ t.date }} {{ t.time }}</td>
+  <td class="{{ 'diff-cell' if 'type' in differs }}">{{ t.type }}{{ ' (deleted)' if t.deleted }}</td>
+  <td class="{{ 'diff-cell' if 'account' in differs }}">{{ t.account }}</td>
+  <td class="{{ 'diff-cell' if 'category' in differs }}">{{ t.category }}</td>
+  <td class="amount nowrap {{ 'income' if t.income else 'expense' }} {{ 'diff-cell' if 'amount' in differs }}">{{ t.amount }} {{ t.currency }}</td>
+  <td class="{{ 'diff-cell' if 'note' in differs }}">{{ t.note }}</td>
+  <td class="{{ 'diff-cell' if 'description' in differs }}">{{ t.description }}</td>
+{%- endmacro %}
+{% macro tx_head(first='') -%}
+  <tr>{% if first %}<th>{{ first }}</th>{% endif %}<th>Date</th><th>Type</th><th>Account</th><th>Category</th><th>Amount</th><th>Note</th><th>Description</th></tr>
+{%- endmacro %}
+{% macro was(t, f) -%}
+  {%- if f in t.was and t.was[f] %}<span class="was">{{ t.was[f] }}</span>{% endif -%}
+{%- endmacro %}
+{% macro field_changes(fields) -%}
+  {%- for label, a, b in fields %}{{ label }}: <span class="was-inline">{{ a or '(empty)' }}</span> → {{ b or '(empty)' }}{{ '; ' if not loop.last }}{% endfor -%}
+{%- endmacro %}
+{% macro mark(m) -%}
+  {%- if m == 'conflict' %}<span class="muted">see Conflicts</span>{% elif m == 'duplicate' %}<span class="muted">see Possible duplicates</span>{% endif -%}
+{%- endmacro %}
+{% macro changes_card(c, heading, note) -%}
+{% set n = c.transactions | length + c.rows | length %}
+<div class="card card-wide sync-section">
+  <details {{ 'open' if n <= 100 }}>
+    <summary>{{ heading }}: {{ c.summary or 'no changes' }}</summary>
+    <p class="muted">{{ note }}</p>
+    {% if c.transactions %}
+    <div class="table-scroll"><table class="sync-changes">
+      {{ tx_head(' ') }}
+      {% for t in c.transactions[:500] %}
+      <tr>
+        <td class="nowrap"><span class="badge change-{{ t.what }}">{{ t.word }}</span> {{ mark(t.mark) }}</td>
+        <td class="nowrap {{ 'diff-cell' if 'date' in t.was }}">{{ was(t, 'date') }}{{ t.date }} {{ t.time }}</td>
+        <td class="{{ 'diff-cell' if 'type' in t.was }}">{{ was(t, 'type') }}{{ t.type }}</td>
+        <td class="{{ 'diff-cell' if 'account' in t.was }}">{{ was(t, 'account') }}{{ t.account }}</td>
+        <td class="{{ 'diff-cell' if 'category' in t.was }}">{{ was(t, 'category') }}{{ t.category }}</td>
+        <td class="amount nowrap {{ 'income' if t.income else 'expense' }} {{ 'diff-cell' if 'amount' in t.was }}">{{ was(t, 'amount') }}{{ t.amount }} {{ t.currency }}</td>
+        <td class="{{ 'diff-cell' if 'note' in t.was }}">{{ was(t, 'note') }}{{ t.note }}</td>
+        <td class="{{ 'diff-cell' if 'description' in t.was }}">{{ was(t, 'description') }}{{ t.description }}</td>
+      </tr>
+      {% if t.other %}<tr class="sync-other"><td></td><td colspan="7">Also changed: {{ field_changes(t.other) }}</td></tr>{% endif %}
+      {% endfor %}
+    </table></div>
+    {% if c.transactions | length > 500 %}<p class="muted">and {{ c.transactions | length - 500 }} more transactions.</p>{% endif %}
+    {% endif %}
+    {% if c.rows %}
+    <ul class="sync-rows">
+      {% for r in c.rows %}
+      <li><span class="badge change-{{ r.what }}">{{ r.word }}</span> {{ r.title }}{% if r.fields %}: {{ field_changes(r.fields) }}{% endif %} {{ mark(r.mark) }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% if c.quiet %}<p class="muted">{{ c.quiet }} more {{ 'row' if c.quiet == 1 else 'rows' }} changed only in bookkeeping fields (update times, sync stamps, amounts restated in the main currency).</p>{% endif %}
+  </details>
+</div>
+{%- endmacro %}
+{% block content %}
+<div class="card card-wide sync-section" style="margin-top:0;">
+  <h2>Review sync</h2>
+  <p class="muted" style="font-size:14px;">
+    Merging <strong>{{ v.pending.name }}</strong>
+    ({{ 'from Google Drive' if v.pending.source == 'gdrive' else 'uploaded' }}{{ ', ' ~ v.pending.started_at.replace('T', ' ') if v.pending.started_at }})
+    into this database. Nothing changes until you apply it.
+  </p>
+  {% if v.two_way %}
+  <p class="flash flash-warn">There's no snapshot from an earlier sync to compare against, so it isn't known which side
+    changed what. Every row that differs is listed as a conflict, and rows that exist on only one side are kept.</p>
+  {% endif %}
+  {% if not v.schema_problems %}
+  <dl class="kv">
+    <dt>From the app</dt><dd>{{ v.from_app or 'No changes' }}</dd>
+    <dt>Changed here</dt><dd>{{ v.from_here or 'No changes' }}</dd>
+  </dl>
+  {% if not (v.problems or v.duplicates or v.conflicts) %}
+  <p style="font-size:14px;">Nothing conflicts. The changes are listed below.</p>
+  <div class="actions" style="margin-top:8px;">
+    <button type="submit" class="btn-primary" form="sync-form">Apply the merge</button>
+    <button type="submit" class="btn-secondary" form="sync-cancel">Cancel</button>
+  </div>
+  {% endif %}
+  {% endif %}
+</div>
+
+{% if v.schema_problems %}
+<div class="card card-wide sync-section sync-blocking">
+  <h3>This file can't be merged</h3>
+  <ul>{% for p in v.schema_problems %}<li>{{ p }}</li>{% endfor %}</ul>
+  <p class="muted">You can replace this database with the file instead (the current one is backed up first), or cancel.</p>
+</div>
+{% endif %}
+
+<form method="post" action="/sync/apply" id="sync-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="fingerprint" value="{{ v.fingerprint }}">
+
+  {% if v.problems %}
+  <div class="card card-wide sync-section sync-blocking">
+    <h3>Fix these first ({{ v.problems | length }})</h3>
+    <p class="muted">The merge would leave these broken. Fix them here or in the app (then back up again), and check again.
+      Choices below can also change what's listed.</p>
+    {% for p in v.problems %}
+    <div class="sync-item">
+      <p>{{ p.text }}</p>
+      {% if p.tx %}
+      <div class="table-scroll"><table>{{ tx_head() }}<tr>{{ tx_cells(p.tx) }}</tr></table></div>
+      {% endif %}
+      <p class="muted">{{ p.fix }}</p>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if v.duplicates %}
+  <div class="card card-wide sync-section">
+    <h3>Possible duplicates ({{ v.duplicates | length }})</h3>
+    <p class="muted">Each pair was added both here and in the app since the last sync, and looks like the same
+      transaction entered twice. Differences are highlighted.</p>
+    {% for d in v.duplicates %}
+    <div class="sync-item">
+      <div class="table-scroll"><table>
+        {{ tx_head(' ') }}
+        {% for t in d.local %}<tr><td class="muted">{{ 'Here' if loop.first }}</td>{{ tx_cells(t, d.differs if loop.first else ()) }}</tr>{% endfor %}
+        {% for t in d.remote %}<tr><td class="muted">{{ 'App' if loop.first }}</td>{{ tx_cells(t, d.differs if loop.first else ()) }}</tr>{% endfor %}
+      </table></div>
+      <div class="sync-choices">
+        <label class="check"><input type="radio" name="choice_{{ d.id }}" value="remote" {{ 'checked' if d.choice == 'remote' }}> Same transaction: keep the app's</label>
+        <label class="check"><input type="radio" name="choice_{{ d.id }}" value="local" {{ 'checked' if d.choice == 'local' }}> Same transaction: keep this one</label>
+        <label class="check"><input type="radio" name="choice_{{ d.id }}" value="both" {{ 'checked' if d.choice == 'both' }}> Different transactions: keep both</label>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if v.conflicts %}
+  <div class="card card-wide sync-section">
+    <h3>Conflicts ({{ v.conflicts | length }})</h3>
+    <p class="muted">These were changed differently here and in the app. Choose which version to keep; the other
+      changes to the same rows merge on their own.</p>
+    <div class="actions" style="margin-top:8px;">
+      <button type="button" class="btn-secondary" onclick="chooseAll('local')">Keep this database's for all</button>
+      <button type="button" class="btn-secondary" onclick="chooseAll('remote')">Take the app's for all</button>
+    </div>
+    {% for c in v.conflicts %}
+    <div class="sync-item">
+      <p><strong>{{ c.heading }}:</strong> {{ c.title }}</p>
+      {% if c.fields %}
+      <div class="table-scroll"><table>
+        <tr><th>Field</th>{% if not c.two_way %}<th>At the last sync</th>{% endif %}<th>Here</th><th>In the app</th></tr>
+        {% for f in c.fields %}
+        <tr><td>{{ f.label }}</td>{% if not c.two_way %}<td class="muted">{{ f.base }}</td>{% endif %}<td>{{ f.local }}</td><td>{{ f.remote }}</td></tr>
+        {% endfor %}
+      </table></div>
+      {% endif %}
+      <div class="sync-choices">
+        <label class="check"><input type="radio" name="choice_{{ c.id }}" value="local" required {{ 'checked' if c.choice == 'local' }}> {{ c.local_label }}</label>
+        <label class="check"><input type="radio" name="choice_{{ c.id }}" value="remote" required {{ 'checked' if c.choice == 'remote' }}> {{ c.remote_label }}</label>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if v.changes %}
+  {{ changes_card(v.changes.remote, 'From the app', 'Applied to this database.') }}
+  {% if v.changes.local.transactions or v.changes.local.rows or v.changes.local.quiet %}
+  {{ changes_card(v.changes.local, 'Changed here', 'Kept, and part of what goes back to the app.') }}
+  {% endif %}
+  {% endif %}
+
+  <div class="card card-wide sync-section">
+    <div class="actions" style="margin-top:0;">
+      {% if not v.schema_problems %}
+      <button type="submit" class="btn-primary" {{ 'disabled' if v.problems }}>Apply the merge</button>
+      <a class="btn-secondary" href="/sync">Check again</a>
+      {% endif %}
+      <button type="submit" class="btn-secondary" form="sync-cancel">Cancel</button>
+      <button type="submit" class="btn-secondary" form="sync-replace">Replace this database with the file</button>
+    </div>
+    <p class="muted">{% if v.pending.source == 'gdrive' %}After merging, the result is written back to {{ v.pending.name }} on Drive.
+      {% else %}After merging, download the database from Settings to restore it in Money Manager.{% endif %}
+      The current database is backed up first either way.</p>
+  </div>
+</form>
+
+<form method="post" action="/sync/cancel" id="sync-cancel">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+</form>
+<form method="post" action="/sync/replace" id="sync-replace"
+      onsubmit="return confirm('Replace this database with the incoming file? Changes made here since the last sync are discarded (a backup is taken first).');">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+</form>
+
+<script>
+function chooseAll(side) {
+  document.querySelectorAll('#sync-form input[type=radio][name^="choice_c"][value="' + side + '"]').forEach(el => { el.checked = true; });
+}
+</script>
+{% endblock %}

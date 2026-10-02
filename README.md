@@ -108,18 +108,54 @@ After logging in, each user is asked how to get their database:
 
 - **Upload manually**: pick a `.mmbak` exported from the Money Manager app.
 - **Google Drive**: the setup page walks you through creating your own Google
-  API project and OAuth client (Desktop app, read-only Drive scope), then pulls
-  the newest `MM*.mmbak` from the Drive folder the app backs up to
-  (default `MoneyManager`). Nothing is ever written to Drive.
+  API project and OAuth client (Desktop app), then pulls the newest
+  `MM*.mmbak` from the Drive folder the app backs up to (default
+  `MoneyManager`).
 
-Settings -> Database shows where the current file came from, lets you upload a
-replacement or "Sync now", and disconnects Drive.
+## Syncing with the app
+
+Edits made here and new transactions entered in the app are merged, so
+neither side has to be thrown away:
+
+- **Google Drive**: Settings -> "Sync now" merges the newest `MM*.mmbak` in
+  the folder into the database here, then writes the result back to that
+  same file on Drive (same name, since the app only lists its own backups).
+  Restore that backup in Money Manager to get the changes made here onto your
+  phone. Drive keeps the file's previous version, and the app's original is
+  also kept in the local backup taken before the merge.
+- **Manual**: Settings -> "Sync with a newer export" merges an uploaded
+  `.mmbak`, and "Download" gives you the result to restore in the app.
+
+Rows are matched by their ids, so renamed accounts and categories or edited
+transactions merge cleanly with what was added in the app. Before anything is
+applied, a review page lists what changed in the app and here: new, changed
+and deleted transactions (with the old values of changed fields), accounts,
+categories and other rows. It also asks about anything that can't be decided
+automatically:
+
+- a transaction added on both sides that looks like the same one entered
+  twice: keep the app's, keep this one, or keep both;
+- the same field changed differently on both sides, or a row changed on one
+  side and deleted on the other: pick which version to keep;
+- anything the merge would break, such as a new transaction in a category
+  the other side deleted: fix it first, then check again.
+
+Settings -> Advanced options can still replace the database outright.
+
+## Installing as an app
+
+MMW is a progressive web app: "Install app" in Chrome/Edge or "Add to Home
+Screen" in Safari gives it its own icon and window. Browsers only offer this
+over HTTPS (or on localhost), so deploy it behind a TLS proxy as below. The
+installed app still needs the server: nothing is stored on the device, and
+without a connection it shows an offline page.
 
 ## Deploying publicly
 
 The app speaks plain HTTP and has its own login, but it holds financial data
-and, if Drive sync is set up, a token that can read the user's whole Google
-Drive (Google has no folder-only scope for this). The safest setup is not to
+and, if Drive sync is set up, a token for the user's whole Google Drive,
+read-write unless writing was turned off at setup (Google has no folder-only
+scope that can see the app's backups). The safest setup is not to
 expose it at all and reach it over a VPN such as Tailscale or WireGuard. If it
 has to be public:
 
@@ -199,8 +235,11 @@ same folder the compose file mounts (don't run both at once).
 - `src/app.py`: all routes, SQL, and helpers.
 - `src/dbstore.py`: where data lives: app-wide config and each user's database (paths, validation, install, backups) and settings.
 - `src/users.py`: accounts, passwords and login throttling.
-- `src/gdrive.py`: Google OAuth + Drive pull-sync.
+- `src/gdrive.py`: Google OAuth and Drive access.
+- `src/merge.py`: the three-way merge of two databases.
+- `src/dbsync.py`: syncing with Drive or an uploaded export, and the review.
 - `src/templates/`: Jinja2 templates, one per page.
+- `src/static/`: icons, the PWA manifest, service worker and offline page.
 - `docker/entrypoint.sh`: container init (`FILE__` secrets, `PUID`/`PGID`, banner).
 - `docs/MM_DB_SCHEMA.md`: reverse-engineered notes on the `.mmbak` schema.
 
@@ -209,6 +248,7 @@ same folder the compose file mounts (don't run both at once).
 Each user's working database is copied to
 `<data>/users/<name>/backups/<timestamp>/` (with a
 `diff.txt` against the previous backup) before the first write after startup
-and before any upload or sync replaces it. Settings -> Advanced options sets
+and before any upload or sync replaces it (a sync merge also keeps the app's
+file there as `incoming.mmbak`). Settings -> Advanced options sets
 how many to keep, turns off the first-write backup or the diff, and has a
 "Back up now" button.

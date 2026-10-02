@@ -5,7 +5,8 @@
   <h2>Connect Google Drive</h2>
   <p class="muted" style="font-size:14px;">
     This app signs in with <em>your own</em> Google API project, so no credentials are shared with anyone.
-    It only asks for read-only access to Drive and only ever downloads the newest <code>MM*.mmbak</code> snapshot.
+    Sync downloads the newest <code>MM*.mmbak</code> backup, merges it with the database here and writes the result
+    back to that same file, so you can restore it in Money Manager. It never touches other files.
     {% if connected %}<strong>Currently connected.</strong> Saving below signs in again.{% endif %}
   </p>
 
@@ -14,7 +15,7 @@
     <li>Open the <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener">Google Cloud Console</a> and create a project (any name), or pick one you already have.</li>
     <li>Enable the API: <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener">Google Drive API &rarr; Enable</a>.</li>
     <li>Open <a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noopener">Google Auth Platform</a> and configure the consent screen: app name and your email, Audience <strong>External</strong>.
-      Under <em>Data access</em>, add the scope <code>.../auth/drive.readonly</code>.</li>
+      Under <em>Data access</em>, add the scope <code>.../auth/drive</code> (or <code>.../auth/drive.readonly</code> if you'll turn off writing below).</li>
     <li>Under <em>Audience</em>, click <strong>Publish app</strong> (it stays unverified, which is fine for personal use).
       If you leave it in <em>Testing</em>, add your Google account as a test user, but Google then expires the sign-in every 7 days.</li>
     <li>Under <a href="https://console.cloud.google.com/auth/clients" target="_blank" rel="noopener">Clients</a>, <strong>Create client</strong>, application type <strong>Desktop app</strong>. Copy the Client ID and Client secret.
@@ -31,13 +32,16 @@
            placeholder="{{ 'saved - leave blank to keep' if has_secret else '' }}" {{ '' if has_secret else 'required' }}>
     <label for="folder-name">Drive folder with the Money Manager backups</label>
     <input type="text" name="folder_name" id="folder-name" value="{{ folder_name }}">
+    <label class="check"><input type="checkbox" name="write" value="1" {{ 'checked' if write }}>
+      Write merged databases back to Drive. Needs full Drive access (Google has no narrower scope that can update the
+      app's backups); without it, MMW only reads Drive and changes made here stay here.</label>
     <div class="actions">
       <button type="submit" class="btn-primary">Save and sign in with Google</button>
       <a class="btn-secondary" href="{{ '/setup' if first_run else '/settings' }}">Back</a>
     </div>
   </form>
   <p class="muted" style="margin-top:12px;">
-    Google will say the app isn't verified: choose <em>Advanced &rarr; Continue</em>, then allow read-only access to Drive.
+    Google will say the app isn't verified: choose <em>Advanced &rarr; Continue</em>, then allow access to Drive.
   </p>
 
   <h3>3. Only if this app isn't running on the machine your browser is on</h3>

@@ -7,6 +7,20 @@ Notable changes to Money Mgr web. The format follows
 
 ### Added
 
+- Two-way sync with the Money Manager app. Syncing merges the app's newer
+  backup into the database here instead of replacing it: new transactions
+  from the app come in, and edits, renames and transactions added here are
+  kept. A review page shows what changed on each side before the merge is
+  applied, with the old values of changed fields. Possible duplicates (the
+  same transaction entered on both sides), conflicting edits and anything the
+  merge would break are settled there too.
+  - Google Drive: "Sync now" merges the newest backup and writes the result
+    back to that same file on Drive, ready to restore in the app. With
+    nothing new on Drive, it uploads the changes made here.
+  - Manual: "Sync with a newer export" merges an uploaded `.mmbak`, and
+    "Download" gives back the result to restore in the app.
+- Settings shows when the database was last synced and whether it has
+  changes the app doesn't have yet.
 - User accounts with a login page. The first run asks for an admin account,
   protected by a one-time setup code printed in the log;
   admins add, remove and promote users and reset passwords under **Users**.
@@ -39,9 +53,22 @@ Notable changes to Money Mgr web. The format follows
 - `GET /healthz` and a `HEALTHCHECK` in the image.
 - Image labels with the version and build date (`--build-arg VERSION=...`,
   `BUILD_DATE=...`).
+- Installable as an app (PWA) on phones and desktops, with its own icon and
+  window. Pages fit narrow screens better, and losing the connection shows
+  an offline page. Nothing is stored on the device. Installing needs HTTPS
+  (or localhost).
 
 ### Changed
 
+- Google Drive now asks for full Drive access so sync can write the merged
+  database back (writing can be turned off at setup, which keeps read-only
+  access). Existing read-only connections keep working but don't upload;
+  reconnect to allow it.
+- Uploading a file or pulling from Drive without merging ("Replace the
+  database") moved under Settings -> Advanced options. "Sync now" no longer
+  refuses when there are local edits.
+- Backups taken before a sync merge also keep the app's file as
+  `incoming.mmbak`.
 - The project is abbreviated MMW: environment variables are renamed from
   `MM_*` to `MMW_*` (`MMW_DATA_DIR`, `MMW_BACKUP_KEEP`, ...), and browser
   settings move from `mm_*` to `mmw_*` keys (carried over automatically).

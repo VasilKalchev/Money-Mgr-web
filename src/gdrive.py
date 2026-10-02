@@ -1,31 +1,34 @@
-"""Google Drive pull-sync for the Money Manager snapshots.
+"""Google Drive access for the Money Manager snapshots.
 
 The Android app writes MM*.mmbak snapshots into a Drive folder (default
 "MoneyManager"). This module signs in with the user's own OAuth client
-(Desktop app type, read-only Drive scope), finds the newest snapshot and
-installs it as that user's working database. Nothing is ever written to
-Drive. Every function takes the user's dbstore.Store, where the
-credentials are kept.
+(Desktop app type), lists and downloads the snapshots, and replaces a
+snapshot's content with a merged database (dbsync.py decides what and
+when). Every function takes the user's dbstore.Store, where the credentials
+are kept.
 
 Talks to Google's REST endpoints directly with `requests`; no Google client
 libraries needed.
 """
-import os
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import requests
 
-import dbstore
-
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 DRIVE_URL = "https://www.googleapis.com/drive/v3"
-# Read-only, but whole-Drive: the snapshot folder is created by another app,
-# so the narrower drive.file scope can't see it.
-SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3"
+# Whole-Drive scopes: the snapshot folder is created by another app, so the
+# narrower drive.file scope can't see it. Writing the merged database back
+# means updating that app's files, which needs full access; without it,
+# sync only merges into the working database.
+SCOPE_WRITE = "https://www.googleapis.com/auth/drive"
+SCOPE_READ = "https://www.googleapis.com/auth/drive.readonly"
 DEFAULT_FOLDER = "MoneyManager"
+FILE_FIELDS = "id,name,md5Checksum,modifiedTime,size,mimeType"
 TIMEOUT = 30
+UPLOAD_TIMEOUT = 300
 
 _tokens = {}  # store.root -> {"value": access token, "expires": epoch secs}
 
@@ -55,9 +58,21 @@ def folder_name(store):
     return settings(store).get("folder_name") or DEFAULT_FOLDER
 
 
-def save_credentials(store, client_id, client_secret, folder):
+def wants_write(store):
+    """Whether the user chose to let sync write merged databases back."""
+    return settings(store).get("write", True)
+
+
+def can_write(store):
+    """Whether the saved sign-in was granted write access (sign-ins from
+    before writing existed were read-only)."""
+    return SCOPE_WRITE in settings(store).get("scope", "").split()
+
+
+def save_credentials(store, client_id, client_secret, folder, write=True):
     """Store the OAuth client. An empty secret keeps the saved one (the form
-    never echoes it back). A different client invalidates the old login."""
+    never echoes it back). A different client invalidates the old login.
+    `write` picks the scope the next sign-in asks for."""
     old = settings(store)
     client_id, client_secret = client_id.strip(), client_secret.strip()
     if not client_id:
@@ -65,9 +80,11 @@ def save_credentials(store, client_id, client_secret, folder):
     secret = client_secret or (old.get("client_secret") if old.get("client_id") == client_id else "")
     if not secret:
         raise GDriveError("Client secret is required.")
-    new = {"client_id": client_id, "client_secret": secret, "folder_name": folder.strip() or DEFAULT_FOLDER}
+    new = {"client_id": client_id, "client_secret": secret, "folder_name": folder.strip() or DEFAULT_FOLDER,
+           "write": bool(write)}
     if old.get("client_id") == client_id and old.get("refresh_token"):
         new["refresh_token"] = old["refresh_token"]
+        new["scope"] = old.get("scope", "")
     store.save_config({"gdrive": new})
     _tokens.pop(store.root, None)
 
@@ -86,7 +103,7 @@ def auth_url(store, redirect_uri, state):
         "client_id": settings(store)["client_id"],
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": SCOPE,
+        "scope": SCOPE_WRITE if wants_write(store) else SCOPE_READ,
         # offline + consent so Google always hands back a refresh token
         "access_type": "offline",
         "prompt": "consent",
@@ -132,7 +149,8 @@ def exchange_code(store, code, redirect_uri):
     if not body.get("refresh_token"):
         raise GDriveError("Google didn't return a refresh token. Remove this app's access at "
                           "myaccount.google.com/permissions and connect again.")
-    store.save_config({"gdrive": {**settings(store), "refresh_token": body["refresh_token"]}})
+    store.save_config({"gdrive": {**settings(store), "refresh_token": body["refresh_token"],
+                                  "scope": body.get("scope", "")}})
     _tokens[store.root] = {"value": body["access_token"], "expires": time.time() + body.get("expires_in", 3600) - 60}
 
 
@@ -151,19 +169,23 @@ def _access_token(store):
 # Drive
 # ---------------------------------------------------------------------------
 
-def _get(store, path, stream=False, **params):
-    try:
-        r = requests.get(f"{DRIVE_URL}/{path}", params=params, stream=stream, timeout=TIMEOUT,
-                         headers={"Authorization": f"Bearer {_access_token(store)}"})
-    except requests.RequestException as e:
-        raise GDriveError(f"Couldn't reach Google Drive: {e}") from e
-    if r.status_code != 200:
+def _check(r, ok=(200,)):
+    if r.status_code not in ok:
         try:
             msg = r.json()["error"]["message"]
         except (ValueError, KeyError, TypeError):
             msg = r.text[:200]
         raise GDriveError(f"Google Drive error ({r.status_code}): {msg}")
     return r
+
+
+def _get(store, path, stream=False, **params):
+    try:
+        r = requests.get(f"{DRIVE_URL}/{path}", params=params, stream=stream, timeout=TIMEOUT,
+                         headers={"Authorization": f"Bearer {_access_token(store)}"})
+    except requests.RequestException as e:
+        raise GDriveError(f"Couldn't reach Google Drive: {e}") from e
+    return _check(r)
 
 
 def _quote(value):
@@ -186,13 +208,17 @@ def list_snapshots(store, folder_id):
     while True:
         body = _get(
             store, "files", q=f"'{folder_id}' in parents and trashed=false and name contains 'MM'",
-            fields="nextPageToken,files(id,name,md5Checksum,modifiedTime,size)",
+            fields=f"nextPageToken,files({FILE_FIELDS})",
             orderBy="modifiedTime desc", pageSize=1000, **({"pageToken": token} if token else {}),
         ).json()
         out += [f for f in body["files"] if f["name"].startswith("MM") and f["name"].endswith(".mmbak")]
         token = body.get("nextPageToken")
         if not token:
             return out
+
+
+def file_meta(store, file_id):
+    return _get(store, f"files/{file_id}", fields=FILE_FIELDS).json()
 
 
 def download(store, file, dest):
@@ -202,40 +228,31 @@ def download(store, file, dest):
             f.write(chunk)
 
 
+def upload(store, file, path):
+    """Replace the content of an existing Drive file with the file at
+    `path`, keeping its id and name (the app only offers its own backups
+    for restoring). Drive keeps the old content as a previous version.
+    Returns the file's new metadata."""
+    mime = file.get("mimeType") or "application/octet-stream"
+    with open(path, "rb") as f:
+        data = f.read()
+    try:
+        # A resumable session, since simple uploads stop at 5 MB.
+        r = _check(requests.patch(
+            f"{UPLOAD_URL}/files/{file['id']}", params={"uploadType": "resumable"}, data="{}", timeout=TIMEOUT,
+            headers={"Authorization": f"Bearer {_access_token(store)}", "Content-Type": "application/json; charset=UTF-8",
+                     "X-Upload-Content-Type": mime, "X-Upload-Content-Length": str(len(data))},
+        ))
+        session = r.headers.get("Location")
+        if not session:
+            raise GDriveError("Google Drive didn't start the upload.")
+        _check(requests.put(session, data=data, timeout=UPLOAD_TIMEOUT, headers={"Content-Type": mime}), ok=(200, 201))
+    except requests.RequestException as e:
+        raise GDriveError(f"Couldn't reach Google Drive: {e}") from e
+    return file_meta(store, file["id"])
+
+
 def check_connection(store):
     """Raise GDriveError unless the folder is reachable; returns the number
     of snapshots in it."""
     return len(list_snapshots(store, find_folder(store, folder_name(store))))
-
-
-def sync(store, overwrite=False):
-    """Pull the newest snapshot into the working database.
-
-    Returns (status, name): "installed", "up_to_date", or "local_modified" when
-    a newer snapshot exists but the working db has unsynced edits and
-    `overwrite` wasn't given (nothing is changed then)."""
-    snapshots = list_snapshots(store, find_folder(store, folder_name(store)))
-    if not snapshots:
-        raise GDriveError(f"No MM*.mmbak snapshots in the \"{folder_name(store)}\" folder.")
-    latest = snapshots[0]
-
-    if store.db_exists():
-        info = store.db_info()
-        if info.get("remote_id") == latest["id"] and info.get("remote_md5") == latest.get("md5Checksum"):
-            return "up_to_date", latest["name"]
-        if store.local_modified() and not overwrite:
-            return "local_modified", latest["name"]
-
-    staged = store.staging_path()
-    try:
-        download(store, latest, staged)
-        if latest.get("md5Checksum") and dbstore.file_md5(staged) != latest["md5Checksum"]:
-            raise GDriveError("Download was corrupted (checksum mismatch); try again.")
-    except Exception:
-        os.remove(staged)
-        raise
-    store.install_db(
-        staged, "gdrive", latest["name"],
-        remote_id=latest["id"], remote_md5=latest.get("md5Checksum"), remote_modified=latest.get("modifiedTime"),
-    )
-    return "installed", latest["name"]

@@ -7,32 +7,29 @@
   <dl class="kv">
     <dt>File</dt><dd>{{ db.name }}</dd>
     <dt>Source</dt><dd>{{ 'Google Drive' if db.source == 'gdrive' else 'Uploaded manually' }}</dd>
-    <dt>Installed</dt><dd>{{ db.installed_at.replace('T', ' ') if db.installed_at else '-' }}</dd>
+    <dt>Last synced</dt><dd>{{ (db.synced_at or db.installed_at).replace('T', ' ') if (db.synced_at or db.installed_at) else '-' }}</dd>
     <dt>Last changed</dt><dd>{{ db.mtime | mtime }}</dd>
     <dt>Size</dt><dd>{{ '{:,.1f}'.format(db.size / 1024 / 1024) }} MB</dd>
-    <dt>Local edits</dt><dd>{{ 'Yes - changed in this app since it was installed' if db.local_modified else 'None' }}</dd>
+    <dt>Changes not in the app</dt><dd>{{ ('Yes, not on Drive yet' if db.source == 'gdrive' else 'Yes, download and restore it in the app') if db.unsynced else 'None' }}</dd>
     <dt>Backups</dt><dd>{{ db.backups }}{% if db.latest_backup %}, newest {{ db.latest_backup }}{% endif %}</dd>
   </dl>
   {% else %}
   <p class="muted" style="font-size:14px;">No database yet. <a href="/setup">Set one up</a>, or use the options below.</p>
   {% endif %}
 
-  <h3>Upload a {{ 'replacement ' if db.exists }}file</h3>
-  <form method="post" action="/db/upload" enctype="multipart/form-data"
-        {% if db.exists %}onsubmit="return confirm('Replace the current database with this file? The current one is backed up first.');"{% endif %}>
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <input type="file" name="db_file" accept=".mmbak,.sqlite,.db" required>
-    <div class="actions"><button type="submit" class="btn-secondary">Upload</button></div>
-  </form>
-
-  <h3>Google Drive</h3>
   {% if gdrive_connected %}
-  <p class="muted" style="font-size:14px;">Connected. Pulls the newest <code>MM*.mmbak</code> from the <code>{{ gdrive_folder }}</code> folder. Nothing is written to Drive.</p>
+  <h3>Google Drive</h3>
+  <p class="muted" style="font-size:14px;">Connected to the <code>{{ gdrive_folder }}</code> folder. Sync merges the newest
+    <code>MM*.mmbak</code> there into this database (new transactions from the app are added, changes made here are kept)
+    {%- if gdrive_can_write %} and writes the result back to that file. Restore it in Money Manager afterwards to get the
+    changes made here onto your phone.{% else %}.{% endif %}</p>
+  {% if not gdrive_can_write %}
+  <p class="flash flash-warn">{% if gdrive_wants_write %}This sign-in can only read Drive, so changes made here can't be written back.
+    <a href="/setup/gdrive">Reconnect</a> to allow writing.{% else %}Connected read-only: changes made here aren't written back to Drive.{% endif %}</p>
+  {% endif %}
   <div class="actions" style="margin-top:8px;">
-    <form method="post" action="/db/sync"
-          {% if db.exists and db.local_modified %}onsubmit="if (confirm('This database has edits that were never synced. If a newer snapshot exists, it will replace them (a backup is taken first). Continue?')) { this.overwrite.value = '1'; return true; } return false;"{% endif %}>
+    <form method="post" action="/db/sync">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <input type="hidden" name="overwrite" value="">
       <button type="submit" class="btn-primary">Sync now</button>
     </form>
     <a class="btn-secondary" href="/setup/gdrive">Reconnect</a>
@@ -41,9 +38,60 @@
       <button type="submit" class="btn-secondary">Disconnect</button>
     </form>
   </div>
+  {% endif %}
+
+  {% if db.exists and not gdrive_connected %}
+  <h3>Sync with a newer export</h3>
+  <p class="muted" style="font-size:14px;">Upload a <code>.mmbak</code> exported from Money Manager. New transactions from
+    the app are added and the changes made here are kept. You see what changes (and settle any duplicates or
+    conflicts) before it's applied.</p>
+  <form method="post" action="/db/sync/upload" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="file" name="db_file" accept=".mmbak,.sqlite,.db" required>
+    <div class="actions"><button type="submit" class="btn-primary">Merge</button></div>
+  </form>
+  {% endif %}
+
+  {% if db.exists %}
+  <h3>Download</h3>
+  <p class="muted" style="font-size:14px;">The database as a <code>.mmbak</code> file, to restore in Money Manager
+    {{- " if you don't use Drive" if gdrive_connected }}.</p>
+  <div class="actions" style="margin-top:8px;"><a class="btn-secondary" href="/db/download">Download</a></div>
   {% else %}
+  <h3>Upload a file</h3>
+  <form method="post" action="/db/upload" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="file" name="db_file" accept=".mmbak,.sqlite,.db" required>
+    <div class="actions"><button type="submit" class="btn-secondary">Upload</button></div>
+  </form>
+  {% endif %}
+
+  {% if not gdrive_connected %}
+  <h3>Google Drive</h3>
   <p class="muted" style="font-size:14px;">Not connected.</p>
   <div class="actions" style="margin-top:8px;"><a class="btn-secondary" href="/setup/gdrive">Set up Google Drive sync</a></div>
+  {% endif %}
+
+  {% if db.exists %}
+  <div class="adv">
+    <h3>Replace the database</h3>
+    <p class="muted" style="font-size:14px;">Replaces this database instead of merging, discarding changes made here since
+      the last sync. The current one is backed up first.</p>
+    <form method="post" action="/db/upload" enctype="multipart/form-data"
+          onsubmit="return confirm('Replace the current database with this file? Changes made here are discarded (the current one is backed up first).');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="file" name="db_file" accept=".mmbak,.sqlite,.db" required>
+      <div class="actions"><button type="submit" class="btn-secondary">Upload a replacement</button></div>
+    </form>
+    {% if gdrive_connected %}
+    <form method="post" action="/db/sync"
+          onsubmit="return confirm('Replace the current database with the newest backup on Drive? Changes made here are discarded (the current one is backed up first).');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="replace" value="1">
+      <div class="actions"><button type="submit" class="btn-secondary">Replace with the newest Drive backup</button></div>
+    </form>
+    {% endif %}
+  </div>
   {% endif %}
 
   <div class="actions">
@@ -54,7 +102,8 @@
 <div class="card card-wide adv" style="margin-top:16px;">
   <h2>Backups</h2>
   <p class="muted">Snapshots of the database are kept in <code>{{ db.backup_dir }}</code>, one folder per backup.
-    One is always taken before an upload or Drive sync replaces the database.</p>
+    One is always taken before an upload or sync replaces the database (with the app's incoming file alongside
+    when a sync merges).</p>
   {% if db.exists %}
   <form method="post" action="/db/backup">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

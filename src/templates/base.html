@@ -2,7 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#202024">
 <title>{% block title %}Money Mgr web{% endblock %}</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <script>
   // Keys used to be prefixed mm_; carry them over to mmw_ once.
   try {
@@ -212,10 +217,43 @@
   .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 14px; margin: 0 0 12px; }
   .kv dt { color: var(--muted); } .kv dd { margin: 0; }
 
+  /* Sync review (sync.html) */
+  .sync-section { margin-top: 16px; max-width: 1100px; }
+  .sync-blocking { border-color: var(--expense); }
+  .sync-item { border-top: 1px solid var(--border); padding: 12px 0 4px; margin-top: 12px; font-size: 14px; }
+  .sync-item p { margin: 0 0 8px; }
+  .sync-item .table-scroll { margin-bottom: 8px; }
+  .sync-choices { display: flex; flex-wrap: wrap; gap: 4px 20px; margin-top: 4px; }
+  .card .sync-choices label.check { margin-top: 6px; }
+  td.diff-cell { background: rgba(217,164,65,.18); }
+  .sync-section summary { cursor: pointer; font-size: 14px; font-weight: 600; }
+  .sync-section details > p.muted { margin: 4px 0 8px; }
+  .was { display: block; color: var(--muted); text-decoration: line-through; font-size: 12px; }
+  .was-inline { color: var(--muted); text-decoration: line-through; }
+  .sync-changes tr.sync-other td { color: var(--muted); font-size: 12px; padding-top: 0; }
+  .sync-changes tr:has(+ tr.sync-other) td { border-bottom: none; }
+  .sync-rows { list-style: none; padding: 0; margin: 8px 0 0; font-size: 14px; }
+  .sync-rows li { padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .sync-rows li:last-child { border-bottom: none; }
+  .badge.change-added { background: rgba(79,199,133,.18); color: var(--income); }
+  .badge.change-changed { background: rgba(217,164,65,.18); color: var(--pending); }
+  .badge.change-deleted { background: rgba(229,113,110,.18); color: var(--expense); }
+  .badge.change-restored { background: rgba(91,141,255,.18); color: var(--accent); }
+  .card button:disabled { opacity: 0.4; cursor: default; }
+
   #save-dialog-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 1000; align-items: center; justify-content: center; }
   #save-dialog-overlay .card { max-width: 760px; width: 92%; max-height: 82vh; display: flex; flex-direction: column; }
   #save-dialog-body-wrap { overflow: auto; flex: 1; margin-top: 8px; }
   #save-dialog-table th, #save-dialog-table td { font-size: 12px; }
+
+  /* Phones (e.g. the installed app): let the header wrap instead of
+     overflowing, and give the content more of the width. */
+  @media (max-width: 760px) {
+    header { flex-wrap: wrap; padding: 10px 12px; gap: 8px 12px; }
+    header .db-controls { flex: 1 1 100%; }
+    .user-menu { margin-left: auto; }
+    main { padding: 12px; }
+  }
 </style>
 </head>
 <body>
@@ -260,6 +298,9 @@
 <div class="flash flash-{{ category }}">{{ message }}</div>
 {% endfor %}
 {% endwith %}
+{% if sync_pending and request.endpoint not in ('sync_review', 'sync_apply') %}
+<div class="flash flash-warn">A sync is waiting for your review. <a href="/sync">Review it</a></div>
+{% endif %}
 {% block content %}{% endblock %}
 </main>
 
@@ -720,6 +761,10 @@ document.querySelectorAll('input[type=date], input[type=time]').forEach(el => {
     btn.style.display = window.scrollY > 300 ? 'flex' : 'none';
   });
 })();
+
+// Installable app (PWA). Browsers only allow service workers over HTTPS or
+// on localhost.
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 </script>
 </body>
 </html>

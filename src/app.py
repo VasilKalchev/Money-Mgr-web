@@ -1,4 +1,5 @@
 import hmac
+import io
 import ipaddress
 import itertools
 import os
@@ -8,9 +9,10 @@ import sys
 import uuid
 from datetime import datetime, timedelta
 
-from flask import Flask, abort, flash, g, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, g, jsonify, redirect, render_template, request, send_file, session, url_for
 
 import dbstore
+import dbsync
 import gdrive
 import users
 from dbstore import UnsupportedDatabase, check_db_supported
@@ -207,7 +209,7 @@ def text_search_clause(column, raw):
 def inject_db_name():
     if not g.get("user"):
         return {"db_name": "", "db_source": "", "has_db": False, "db_mtime": None, "user_locale": "",
-                "user": None, "is_admin": False, "via_proxy": False}
+                "user": None, "is_admin": False, "via_proxy": False, "sync_pending": False}
     store = current_store()
     return {
         "db_name": store.db_info().get("name") or "(no database)",
@@ -218,6 +220,7 @@ def inject_db_name():
         "user": g.user,
         "is_admin": g.is_admin,
         "via_proxy": g.via_proxy,
+        "sync_pending": os.path.isfile(store.pending_path),
     }
 
 
@@ -252,7 +255,7 @@ app.jinja_env.filters["mtime"] = fmt_mtime
 # ---------------------------------------------------------------------------
 
 # Reachable without being logged in.
-_PUBLIC_ENDPOINTS = {"static", "login", "first_account", "healthz"}
+_PUBLIC_ENDPOINTS = {"static", "login", "first_account", "healthz", "manifest", "service_worker"}
 
 
 def _is_trusted_proxy(addr):
@@ -404,6 +407,19 @@ def healthz():
     return "ok\n", 200, {"Content-Type": "text/plain"}
 
 
+# The PWA's manifest and service worker. Both are public: browsers fetch the
+# manifest without cookies, and the worker has to be served from / to
+# control the whole app (it only caches the offline page, see sw.js).
+@app.route("/manifest.webmanifest")
+def manifest():
+    return app.send_static_file("manifest.webmanifest"), 200, {"Content-Type": "application/manifest+json"}
+
+
+@app.route("/sw.js")
+def service_worker():
+    return app.send_static_file("sw.js"), 200, {"Content-Type": "text/javascript"}
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if not users.has_users():
@@ -540,8 +556,9 @@ def user_action(name, action):
 
 _NO_DB_EXEMPT_ENDPOINTS = {
     "static", "index", "api_db_status", "settings", "backup_settings", "setup", "upload_db", "sync_db",
-    "gdrive_setup", "gdrive_callback", "gdrive_paste", "gdrive_disconnect",
+    "sync_upload", "sync_cancel", "gdrive_setup", "gdrive_callback", "gdrive_paste", "gdrive_disconnect",
     "login", "first_account", "logout", "change_password", "users_page", "user_action", "healthz",
+    "manifest", "service_worker",
 }
 
 
@@ -630,6 +647,7 @@ def gdrive_setup():
                 request.form.get("client_id", ""),
                 request.form.get("client_secret", ""),
                 request.form.get("folder_name", ""),
+                write=request.form.get("write") == "1",
             )
         except gdrive.GDriveError as e:
             flash(str(e), "error")
@@ -644,28 +662,34 @@ def gdrive_setup():
         saved_client_id=creds.get("client_id", ""),
         has_secret=bool(creds.get("client_secret")),
         folder_name=gdrive.folder_name(store),
+        write=gdrive.wants_write(store),
         connected=gdrive.is_connected(store),
         first_run=not store.db_exists(),
         redirect_uri=session.get("gdrive_redirect_uri"),
     )
 
 
-def _sync_and_flash(overwrite=False):
+def _run_sync(fn, *args, **kwargs):
+    """Run a dbsync step and flash its outcome; returns the Result, or None
+    if it failed."""
     try:
-        status, name = gdrive.sync(current_store(), overwrite=overwrite)
-    except (gdrive.GDriveError, UnsupportedDatabase) as e:
+        result = fn(current_store(), *args, **kwargs)
+    except (gdrive.GDriveError, UnsupportedDatabase, dbsync.SyncError) as e:
         flash(f"Sync failed: {e}", "error")
-        return
-    if status == "installed":
-        flash(f"Installed {name} from Google Drive.", "ok")
-    elif status == "up_to_date":
-        flash(f"Already up to date ({name}).", "ok")
-    else:
-        flash(
-            f"{name} is newer on Drive, but the working database has edits that were never synced. "
-            "Nothing was changed. Sync again and confirm to overwrite it (it's backed up first).",
-            "warn",
-        )
+        return None
+    if result.message:
+        flash(result.message, result.level)
+    return result
+
+
+def _after_sync(result):
+    if result and result.status in ("review", "stale"):
+        return redirect(url_for("sync_review"))
+    return redirect(url_for("settings"))
+
+
+def _sync_and_flash(replace=False):
+    return _run_sync(dbsync.sync_gdrive, replace=replace)
 
 
 def _finish_gdrive_auth(code, state):
@@ -707,11 +731,73 @@ def gdrive_paste():
 
 @app.route("/db/sync", methods=["POST"])
 def sync_db():
+    """Sync with Google Drive (replace=1: install the newest snapshot as-is,
+    discarding local changes)."""
     if not gdrive.is_connected(current_store()):
         flash("Google Drive isn't connected.", "error")
-    else:
-        _sync_and_flash(overwrite=request.form.get("overwrite") == "1")
+        return redirect(url_for("settings"))
+    return _after_sync(_sync_and_flash(replace=request.form.get("replace") == "1"))
+
+
+@app.route("/db/sync/upload", methods=["POST"])
+def sync_upload():
+    """Merge an uploaded export into the working database."""
+    store = current_store()
+    f = request.files.get("db_file")
+    if not f or not f.filename:
+        flash("Choose a .mmbak file to merge.", "error")
+        return redirect(url_for("settings"))
+    staged = store.staging_path()
+    f.save(staged)
+    return _after_sync(_run_sync(dbsync.sync_file, staged, f.filename))
+
+
+@app.route("/sync")
+def sync_review():
+    """Review a pending merge: what each side changed, and any conflicts,
+    likely duplicates or problems."""
+    view = dbsync.review(current_store())
+    if view is None:
+        return redirect(url_for("settings"))
+    return render_template("sync.html", v=view)
+
+
+@app.route("/sync/apply", methods=["POST"])
+def sync_apply():
+    decisions = dbsync.decisions_from_form(request.form)
+    result = _run_sync(dbsync.apply, decisions, request.form.get("fingerprint", ""))
+    if result and result.status == "review":
+        # Re-show the review with the choices made so far.
+        view = dbsync.review(current_store(), decisions)
+        if view is not None:
+            return render_template("sync.html", v=view), 409
+    return _after_sync(result)
+
+
+@app.route("/sync/cancel", methods=["POST"])
+def sync_cancel():
+    dbsync.cancel(current_store())
+    flash("Sync cancelled. Nothing was changed.", "ok")
     return redirect(url_for("settings"))
+
+
+@app.route("/sync/replace", methods=["POST"])
+def sync_replace():
+    return _after_sync(_run_sync(dbsync.replace_with_incoming))
+
+
+@app.route("/db/download")
+def download_db():
+    """The working database as a .mmbak to restore in the app."""
+    store = current_store()
+    path = dbsync.download_copy(store)
+    try:
+        with open(path, "rb") as f:
+            data = io.BytesIO(f.read())
+    finally:
+        os.remove(path)
+    return send_file(data, as_attachment=True, download_name=dbsync.download_name(store),
+                     mimetype="application/octet-stream")
 
 
 @app.route("/gdrive/disconnect", methods=["POST"])
@@ -749,9 +835,10 @@ def settings():
         "source": store.load_config().get("db_source", ""),
         "name": info.get("name", ""),
         "installed_at": info.get("installed_at", ""),
+        "synced_at": info.get("synced_at", ""),
         "size": os.path.getsize(store.db_path) if exists else 0,
         "mtime": current_db_mtime(),
-        "local_modified": store.local_modified(),
+        "unsynced": exists and store.unsynced(),
         "backups": store.backup_count(),
         "latest_backup": store.latest_backup(),
         "backup_dir": store.backup_dir,
@@ -764,6 +851,8 @@ def settings():
         backup_cfg=store.backup_settings(),
         has_password=bool(users.get(g.user).get("password_hash")),
         gdrive_connected=gdrive.is_connected(store),
+        gdrive_can_write=gdrive.can_write(store),
+        gdrive_wants_write=gdrive.wants_write(store),
         gdrive_folder=gdrive.folder_name(store),
     )
 

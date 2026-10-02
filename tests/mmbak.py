@@ -71,3 +71,32 @@ def build(path, user_version=19):
     con.commit()
     con.close()
     return path
+
+
+def execute(path, sql, params=()):
+    con = sqlite3.connect(path)
+    try:
+        con.execute(sql, params)
+        con.commit()
+    finally:
+        con.close()
+
+
+def query(path, sql, params=()):
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    try:
+        return con.execute(sql, params).fetchall()
+    finally:
+        con.close()
+
+
+def add_tx(path, uid, wdate="2024-04-01", do_type="1", amount=12.5, asset="a1", ctg="c-food", note="", desc="",
+           zdate=None, **extra):
+    """Insert a transaction the way the app does (no AID: SQLite picks one)."""
+    cols = {"uid": uid, "WDATE": wdate, "ZDATE": str(zdate or 1711929600000), "DO_TYPE": do_type,
+            "AMOUNT_ACCOUNT": amount, "IN_ZMONEY": str(amount), "ZMONEY": str(amount), "assetUid": asset,
+            "ctgUid": ctg, "ZCONTENT": note, "ZDATA": desc, "IS_DEL": 0, "currencyUid": "cur-eur",
+            "toAssetUid": "", "txUidTrans": "", "UTIME": 100, **extra}
+    execute(path, f"INSERT INTO INOUTCOME ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+            list(cols.values()))
