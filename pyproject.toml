@@ -3,6 +3,8 @@ name = "mmw"
 version = "0.0.0"
 description = "Money Mgr web: a self-hosted viewer/editor for Money Manager .mmbak backups"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "flask>=3.1",

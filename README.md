@@ -1,8 +1,16 @@
 # Money Mgr web (MMW)
 
-A self-hosted Flask viewer/editor for a Money Manager (Android app) SQLite
-backup (`.mmbak` file). It has user accounts, and each user has their own
-database, Google Drive connection, backups and settings.
+A self-hosted web version of the Money Manager Android app. It works on the
+app's own database export (the `.mmbak` backup file): you upload a backup or
+pull it from Google Drive, view and edit your transactions, accounts and
+categories in the browser, and restore the result in the app. It has user
+accounts, and each user has their own database, Google Drive connection,
+backups and settings.
+
+> Money Mgr web is an independent project. It is not affiliated with or
+> endorsed by Realbyte Inc., the maker of Money Manager. "Money Manager" is a
+> trademark of its owner and is used here only to say which app this project
+> works with.
 
 ## Running with Docker
 
