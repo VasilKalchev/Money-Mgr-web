@@ -18,6 +18,12 @@ The image follows the conventions of [linuxserver.io](https://www.linuxserver.io
 images: state in `/config`, `PUID`/`PGID`/`UMASK`/`TZ` settings, `FILE__`
 secrets and a startup banner in the log.
 
+Prebuilt images for amd64 and arm64 are published to
+`ghcr.io/vasilkalchev/money-mgr-web`: `latest` and version tags (`1.2.3`,
+`1.2`, `1`) for releases, `edge` for the current `main`. To use one instead
+of building locally, set `image:` to it and drop `build: .` in the compose
+file below.
+
 ### docker compose (recommended)
 
 ```yaml

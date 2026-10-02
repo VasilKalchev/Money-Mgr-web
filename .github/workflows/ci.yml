@@ -1,0 +1,107 @@
+name: CI
+
+# Tests every push and PR, then builds the image and checks that it starts.
+# Pushes to main publish ghcr.io/<owner>/<repo>:edge, and v* tags publish
+# the release (1.2.3, 1.2, 1 and latest), both for amd64 and arm64.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"  # the image's Python
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pytest
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PUSH: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=edge,branch=main
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=ref,event=pr
+            type=sha,format=short
+          # Keep the Dockerfile's, not the repo name and its empty description.
+          labels: |
+            org.opencontainers.image.title=MMW
+            org.opencontainers.image.description=Money Mgr web: a self-hosted viewer/editor for Money Manager .mmbak backups
+
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      # Build for this runner first and check the container comes up healthy.
+      - name: Build (amd64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: mmw:ci
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          docker run -d --name mmw -p 5732:5732 mmw:ci
+          ok=
+          for _ in $(seq 30); do
+            curl -fsS http://127.0.0.1:5732/healthz && ok=1 && break
+            sleep 1
+          done
+          docker logs mmw
+          docker rm -f mmw
+          [ -n "$ok" ] || { echo "/healthz never answered"; exit 1; }
+
+      - if: env.PUSH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish (amd64, arm64)
+        if: env.PUSH == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

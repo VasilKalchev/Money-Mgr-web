@@ -8,3 +8,8 @@ is still used while `/config` is empty. `GET /healthz` (no login) backs the
 image's `HEALTHCHECK`. The image runs gunicorn with a
 single worker (the first-write backup guard, Drive token cache and login
 throttling are per-process), so don't add workers.
+
+`.github/workflows/ci.yml` runs the tests, builds the image and checks
+`/healthz` answers, then publishes it to GHCR (`edge` from `main`, semver
+tags and `latest` from `v*` tags; amd64 and arm64). Release by pushing a
+`vX.Y.Z` tag; the tag becomes `VERSION`/`MMW_VERSION`.
