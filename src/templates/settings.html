@@ -140,6 +140,56 @@
   </form>
 </div>
 
+<div class="card card-wide" style="margin-top:16px;" id="api-tokens">
+  <h2>API tokens</h2>
+  <p class="muted">Let scripts and other apps use your data through the API at <code>/api/v1/</code>, by sending
+    <code>Authorization: Bearer &lt;token&gt;</code>. A token can do anything you can with transactions, so treat it like a password.
+    {% if via_proxy %}Your reverse proxy has to let <code>/api/v1/</code> requests through without its own login.{% endif %}</p>
+  {% if new_token %}
+  <div class="flash flash-ok">
+    <p style="margin:0 0 6px;">Here's your new token. Copy it now: it won't be shown again.</p>
+    <div class="inline-form">
+      <input type="text" id="new-token" value="{{ new_token }}" readonly style="width:100%; font-family:monospace;" onfocus="this.select()">
+      <button type="button" class="btn-secondary" onclick="const i = document.getElementById('new-token'); i.select();
+        (navigator.clipboard ? navigator.clipboard.writeText(i.value) : Promise.resolve(document.execCommand('copy')))
+          .then(() => this.textContent = 'Copied')">Copy</button>
+    </div>
+  </div>
+  {% endif %}
+  {% if api_tokens %}
+  <div class="table-scroll">
+  <table class="users-table">
+    <thead><tr><th>Name</th><th>Access</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+    <tbody>
+    {% for tid, t in api_tokens %}
+    <tr>
+      <td>{{ t.name }}</td>
+      <td>{{ 'Read and write' if t.write else 'Read only' }}</td>
+      <td class="muted nowrap">{{ t.created.replace('T', ' ') }}</td>
+      <td class="muted nowrap">{{ t.last_used.replace('T', ' ') if t.last_used else 'never' }}</td>
+      <td>
+        <form method="post" action="/settings/api-tokens/{{ tid }}/revoke" data-name="{{ t.name }}"
+              onsubmit="return confirm('Revoke the token ' + this.dataset.name + '? Anything using it stops working.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="btn-secondary">Revoke</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+  <h3>New token</h3>
+  <form method="post" action="/settings/api-tokens">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="token-name">Name</label>
+    <input type="text" name="name" id="token-name" maxlength="64" required placeholder="e.g. Home Assistant" autocomplete="off">
+    <label class="check"><input type="checkbox" name="write" value="1"> Allow changes (add, edit and delete transactions)</label>
+    <div class="actions"><button type="submit" class="btn-primary">Create token</button></div>
+  </form>
+</div>
+
 <div class="card card-wide" style="margin-top:16px;">
   <form method="post" action="/account/password">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

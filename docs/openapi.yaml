@@ -1,0 +1,584 @@
+openapi: 3.1.0
+info:
+  title: Money Mgr web API
+  version: "1"
+  summary: Read and edit the Money Manager database of the token's owner.
+  description: |
+    A JSON API for scripts and other apps. Every call works on the database
+    of the user who owns the token, the same one the web pages show.
+
+    ## Tokens
+
+    Create a token under **Settings > API tokens** and send it on every
+    request:
+
+    ```
+    curl -H "Authorization: Bearer mmw_..." https://mmw.example/api/v1/accounts
+    ```
+
+    - A token is shown once, when it's made; only a hash is kept. Revoke it
+      in Settings. Removing the user revokes their tokens; changing the
+      password doesn't.
+    - Read-only tokens can only make `GET` calls; writes get 403.
+    - Token calls don't need the CSRF token. Tokens only work on `/api/v1/`,
+      not on the pages or the pages' own unversioned `/api/` routes.
+    - A logged-in browser session works on `/api/v1/` too, with the
+      session's `X-CSRF-Token` header on writes.
+    - Behind a reverse proxy that does its own login (Authelia, Authentik,
+      ...), let `/api/v1/` through without it, or the proxy blocks token
+      calls.
+
+    ## Conventions
+
+    Every response is JSON with `"ok": true`, or `"ok": false` and an
+    `error` message. Dates are `YYYY-MM-DD` and times `HH:MM:SS`, in the
+    server's local time zone, like the app's own. Amounts are numbers.
+
+    ## Writes and sync
+
+    API writes are like edits in the pages: the first write after a restart
+    or a new database file takes a backup (unless that's switched off in
+    Settings), and they show up as changes made here at the next sync.
+servers:
+  - url: /api/v1
+security:
+  - bearerToken: []
+
+tags:
+  - name: Status
+  - name: Reference data
+    description: Accounts, categories and currencies.
+  - name: Transactions
+
+paths:
+  /status:
+    get:
+      tags: [Status]
+      operationId: getStatus
+      summary: Who the token belongs to and which database it reaches
+      description: Works before a database is set up; `database` is then null.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Status"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+
+  /accounts:
+    get:
+      tags: [Reference data]
+      operationId: listAccounts
+      summary: All accounts with their balances
+      description: In the app's group and account order.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, accounts]
+                properties:
+                  ok: {const: true}
+                  accounts:
+                    type: array
+                    items: {$ref: "#/components/schemas/Account"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409": {$ref: "#/components/responses/NoDatabase"}
+
+  /categories:
+    get:
+      tags: [Reference data]
+      operationId: listCategories
+      summary: The income and expense category trees
+      description: Deleted categories are left out.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, income, expense]
+                properties:
+                  ok: {const: true}
+                  income:
+                    type: array
+                    items: {$ref: "#/components/schemas/Category"}
+                  expense:
+                    type: array
+                    items: {$ref: "#/components/schemas/Category"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409": {$ref: "#/components/responses/NoDatabase"}
+
+  /currencies:
+    get:
+      tags: [Reference data]
+      operationId: listCurrencies
+      summary: All currencies
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, currencies]
+                properties:
+                  ok: {const: true}
+                  currencies:
+                    type: array
+                    items: {$ref: "#/components/schemas/Currency"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409": {$ref: "#/components/responses/NoDatabase"}
+
+  /transactions:
+    get:
+      tags: [Transactions]
+      operationId: listTransactions
+      summary: Transactions matching the Transactions page's filters
+      description: |
+        All filters are optional. Repeat a list parameter to match any of
+        its values (`?account=1&account=4`). Unparseable `amount_min`,
+        `amount_max`, `has_note` and `has_desc` values are ignored, as on
+        the page.
+      parameters:
+        - name: account
+          in: query
+          description: Account uid.
+          schema: {type: array, items: {type: string}}
+        - name: category
+          in: query
+          description: Category uid. A root category includes its children.
+          schema: {type: array, items: {type: string}}
+        - name: category_only
+          in: query
+          description: Root category uid, without its children.
+          schema: {type: array, items: {type: string}}
+        - name: type
+          in: query
+          description: Type code (not name).
+          schema: {type: array, items: {$ref: "#/components/schemas/TypeCode"}}
+        - name: from
+          in: query
+          description: First date, inclusive.
+          schema: {type: string, format: date}
+        - name: to
+          in: query
+          description: Last date, inclusive.
+          schema: {type: string, format: date}
+        - name: q_note
+          in: query
+          description: Text in the note. A leading `!` means "doesn't contain".
+          schema: {type: string}
+        - name: q_desc
+          in: query
+          description: Text in the description. A leading `!` means "doesn't contain".
+          schema: {type: string}
+        - name: has_note
+          in: query
+          schema: {type: string, enum: ["yes", "no"]}
+        - name: has_desc
+          in: query
+          schema: {type: string, enum: ["yes", "no"]}
+        - name: amount_min
+          in: query
+          description: Smallest amount, in the account's currency.
+          schema: {type: number}
+        - name: amount_max
+          in: query
+          description: Largest amount, in the account's currency.
+          schema: {type: number}
+        - name: entered_currency
+          in: query
+          description: Uid of the currency the amount was entered in.
+          schema: {type: string}
+        - name: show_deleted
+          in: query
+          schema: {type: string, enum: [hide, show, only], default: hide}
+        - name: show_mirror
+          in: query
+          description: |
+            Each transfer is stored as two rows; the mirror is the receiving
+            side, so it's hidden by default to count each transfer once.
+          schema: {type: string, enum: [hide, show, only], default: hide}
+        - name: sort
+          in: query
+          schema: {type: string, enum: [date, amount, entered_amount, account, updated], default: date}
+        - name: dir
+          in: query
+          schema: {type: string, enum: [asc, desc], default: desc}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 1000, default: 100}
+        - name: offset
+          in: query
+          schema: {type: integer, minimum: 0, default: 0}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, total, limit, offset, transactions]
+                properties:
+                  ok: {const: true}
+                  total:
+                    type: integer
+                    description: Matching transactions across all pages.
+                  limit: {type: integer}
+                  offset: {type: integer}
+                  transactions:
+                    type: array
+                    items: {$ref: "#/components/schemas/Transaction"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409": {$ref: "#/components/responses/NoDatabase"}
+
+    post:
+      tags: [Transactions]
+      operationId: addTransaction
+      summary: Add a transaction
+      description: |
+        A transfer adds two linked rows (the transfer and its mirror) and
+        converts the amount into the destination account's currency.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/NewTransaction"}
+            examples:
+              expense:
+                value: {type: expense, account: "4", amount: 12.5, category: c3,
+                        date: "2026-10-02", time: "13:30", note: lunch}
+              transfer:
+                value: {type: transfer, account: "4", to_account: "1", amount: 200}
+      responses:
+        "201":
+          description: Added
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TransactionResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/ReadOnly"}
+        "409": {$ref: "#/components/responses/NoDatabase"}
+
+  /transactions/{uid}:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      tags: [Transactions]
+      operationId: getTransaction
+      summary: One transaction, deleted ones included
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TransactionResponse"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/NoDatabase"}
+    patch:
+      tags: [Transactions]
+      operationId: editTransaction
+      summary: Change one or more fields of a transaction
+      description: |
+        Changing the amount or the account restates the entered and
+        main-currency amounts. A transfer's accounts can't be changed
+        (delete it and add a new one), and only income and expense have a
+        category. Edits apply to this row only, not a transfer's mirror.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TransactionChanges"}
+            example: {amount: 14, note: lunch with Sam}
+      responses:
+        "200":
+          description: Changed
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TransactionResponse"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/ReadOnly"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/NoDatabase"}
+    delete:
+      tags: [Transactions]
+      operationId: deleteTransaction
+      summary: Soft-delete a transaction
+      description: |
+        Marks it deleted, as the app does; sync carries the deletion to the
+        app. Deleting either row of a transfer deletes the other row and
+        its fee too. Deleting an already deleted transaction succeeds.
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, deleted]
+                properties:
+                  ok: {const: true}
+                  deleted:
+                    type: array
+                    description: Uids of every row marked deleted.
+                    items: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/ReadOnly"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/NoDatabase"}
+
+components:
+  securitySchemes:
+    bearerToken:
+      type: http
+      scheme: bearer
+      description: An API token from Settings, `mmw_<id>_<secret>`.
+
+  schemas:
+    Error:
+      type: object
+      required: [ok, error]
+      properties:
+        ok: {const: false}
+        error: {type: string}
+
+    Status:
+      type: object
+      required: [ok, user, auth, can_write, database]
+      properties:
+        ok: {const: true}
+        user: {type: string}
+        auth:
+          type: string
+          enum: [token, session, proxy]
+        can_write: {type: boolean}
+        database:
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [name, mtime]
+              properties:
+                name:
+                  type: [string, "null"]
+                  description: The .mmbak file's name.
+                mtime:
+                  type: [number, "null"]
+                  description: Last change, Unix time in seconds.
+
+    Account:
+      type: object
+      required: [uid, name, group_uid, group, currency, balance, transaction_count, status]
+      properties:
+        uid: {type: string}
+        name: {type: [string, "null"]}
+        group_uid: {type: [string, "null"]}
+        group:
+          type: [string, "null"]
+          description: The heading the app files the account under.
+        currency:
+          type: [string, "null"]
+          description: ISO code.
+        balance:
+          type: number
+          description: Derived from the account's live transactions.
+        transaction_count:
+          type: integer
+          description: Live rows on the account, transfer mirrors included.
+        status:
+          type: string
+          enum: [normal, hidden, deleted, other]
+
+    Category:
+      type: object
+      required: [uid, name, children]
+      properties:
+        uid: {type: string}
+        name: {type: [string, "null"]}
+        children:
+          type: array
+          items:
+            type: object
+            required: [uid, name]
+            properties:
+              uid: {type: string}
+              name: {type: [string, "null"]}
+
+    Currency:
+      type: object
+      required: [uid, iso, rate, decimals]
+      properties:
+        uid: {type: string}
+        iso: {type: [string, "null"]}
+        rate:
+          type: [number, "null"]
+          description: Rate to the main currency.
+        decimals: {type: [integer, "null"]}
+
+    TypeName:
+      type: string
+      enum: [income, expense, transfer, transfer_mirror, balance_increase, balance_decrease]
+    TypeCode:
+      type: string
+      description: |
+        `0` income, `1` expense, `3` transfer, `4` transfer mirror, `7`
+        balance increase, `8` balance decrease.
+      enum: ["0", "1", "3", "4", "7", "8"]
+
+    Transaction:
+      type: object
+      required: [uid, type, date, time, timestamp_ms, amount, currency, entered_amount, entered_currency,
+                 account_uid, account, to_account_uid, to_account, category_uid, category, note, description,
+                 transfer_id, deleted, updated_ms]
+      properties:
+        uid: {type: string}
+        type:
+          description: A type name; an unknown code is passed through as is.
+          anyOf:
+            - $ref: "#/components/schemas/TypeName"
+            - type: string
+        date: {type: [string, "null"], format: date}
+        time:
+          type: [string, "null"]
+          description: HH:MM:SS, local time.
+        timestamp_ms:
+          type: [integer, "null"]
+          description: Date and time as Unix time in milliseconds.
+        amount:
+          type: [number, "null"]
+          description: Always positive, in the account's currency; `type` gives the direction.
+        currency:
+          type: [string, "null"]
+          description: The account's currency (ISO code).
+        entered_amount:
+          type: [number, "null"]
+          description: The amount as typed in, which can differ when the app converted it.
+        entered_currency: {type: [string, "null"]}
+        account_uid: {type: [string, "null"]}
+        account: {type: [string, "null"]}
+        to_account_uid:
+          type: [string, "null"]
+          description: Set on transfers. On a mirror row it's the sending account.
+        to_account: {type: [string, "null"]}
+        category_uid:
+          type: [string, "null"]
+          description: '`"-4"` on balance adjustments.'
+        category:
+          type: [string, "null"]
+          description: '"Root" or "Root > Child".'
+        note: {type: string}
+        description: {type: string}
+        transfer_id:
+          type: [string, "null"]
+          description: Shared by both rows of a transfer.
+        deleted: {type: boolean}
+        updated_ms:
+          type: [integer, "null"]
+          description: Last change, Unix time in milliseconds.
+
+    TransactionResponse:
+      type: object
+      required: [ok, transaction]
+      properties:
+        ok: {const: true}
+        transaction: {$ref: "#/components/schemas/Transaction"}
+
+    NewTransaction:
+      type: object
+      required: [type, account, amount]
+      properties:
+        type:
+          description: A name or a code (as a string), except the transfer mirror.
+          anyOf:
+            - type: string
+              enum: [income, expense, transfer, balance_increase, balance_decrease]
+            - type: string
+              enum: ["0", "1", "3", "7", "8"]
+        account:
+          type: string
+          description: Account uid. For a transfer, the sending account.
+        to_account:
+          type: string
+          description: Receiving account uid. Required for, and only used by, transfers.
+        amount:
+          description: More than 0, in the account's currency. A numeric string works too.
+          type: [number, string]
+        category:
+          type: string
+          description: |
+            Required for income and expense, from that tree. Ignored for
+            transfers and balance adjustments.
+        date:
+          type: string
+          format: date
+          description: Omitted means now (and `time` is ignored).
+        time:
+          type: string
+          pattern: '^\d{1,2}:\d{2}(:\d{2})?$'
+          description: Omitted means midnight.
+        note:
+          type: string
+          description: Balance adjustments without one get "Difference".
+        description: {type: string}
+
+    TransactionChanges:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        date:
+          type: string
+          format: date
+          description: Keeps the current time unless `time` is given too.
+        time:
+          type: string
+          pattern: '^\d{1,2}:\d{2}(:\d{2})?$'
+          description: Keeps the current date unless `date` is given too.
+        amount:
+          description: 0 or more, in the account's currency. A numeric string works too.
+          type: [number, string]
+        note: {type: string}
+        description: {type: string}
+        category:
+          type: string
+          description: Income and expense only, from that tree.
+        account:
+          type: string
+          description: Not for transfers.
+
+  responses:
+    BadRequest:
+      description: Invalid input; `error` says what.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: Missing or invalid token.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    ReadOnly:
+      description: A read-only token was used for a write.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: No such transaction.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NoDatabase:
+      description: No database is set up yet, or it's an unsupported version.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}

@@ -32,6 +32,8 @@ area you are working in.
 - `docs/SYNC.md` - how sync, Drive/OAuth and backups work. Read it before
   touching `dbsync.py`, `merge.py`, `gdrive.py` or the backup code in
   `dbstore.py`.
+- `docs/openapi.yaml` - the public `/api/v1/` API and its tokens, the only
+  documentation of it. Update it with any change to those routes.
 - `docs/MM_DB_SCHEMA.md` - reverse-engineered schema notes; read this before
   writing new queries against unfamiliar tables/columns.
 - `docs/CHANGELOG.md` - add user-visible changes under `[Unreleased]`.

@@ -170,6 +170,18 @@ def category_lookup(type_filter):
     return {r["uid"]: {"name": r["NAME"], "status": r["STATUS"], "parent_uid": r["pUid"]} for r in rows}
 
 
+def category_path(lookup, uid):
+    """(root uid, "Root > Child" or "Root") for a category in a
+    category_lookup() tree, or ("", "") if it isn't there."""
+    cat = lookup.get(uid)
+    if not cat:
+        return "", ""
+    if cat["status"] == 0:
+        return uid, cat["name"]
+    root_uid = cat["parent_uid"]
+    return root_uid, f'{lookup.get(root_uid, {}).get("name", "")} > {cat["name"]}'
+
+
 def escape_like(s):
     """Escape %, _ and \\ so a value can be embedded in a LIKE pattern literally."""
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -302,12 +314,31 @@ def _wants_json():
     return request.path.startswith("/api/")
 
 
+def _bearer_token():
+    """The token from an "Authorization: Bearer" header on an /api/v1/ call,
+    else None. Other schemes (a proxy's Basic auth) are left alone."""
+    if not request.path.startswith("/api/v1/"):
+        return None
+    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
+    return token.strip() if scheme.lower() == "bearer" else None
+
+
 @app.before_request
 def _authenticate():
-    """Work out who's asking (trusted proxy header, else the session) and
-    send anyone else to the login page, or to first-run account creation
-    while there are no users at all."""
-    g.user, g.via_proxy, g.is_admin = None, False, False
+    """Work out who's asking (an API token on /api/v1/, else trusted proxy
+    header, else the session) and send anyone else to the login page, or to
+    first-run account creation while there are no users at all."""
+    g.user, g.via_proxy, g.is_admin, g.token = None, False, False, None
+    token = _bearer_token()
+    if token is not None:
+        found = users.user_for_token(token)
+        if not found:
+            return jsonify(ok=False, error="Invalid API token."), 401
+        g.user, _, g.token = found
+        g.is_admin = bool(users.get(g.user).get("admin"))
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not g.token.get("write"):
+            return jsonify(ok=False, error="This API token is read-only."), 403
+        return None
     name = _proxy_user()
     if name:
         g.user, g.via_proxy = name, True
@@ -343,8 +374,9 @@ app.jinja_env.globals["csrf_token"] = csrf_token
 def _check_csrf():
     """Every state-changing request must echo the session's token, as a
     csrf_token form field or an X-CSRF-Token header (base.html adds the
-    header to every fetch)."""
-    if request.method in ("GET", "HEAD", "OPTIONS"):
+    header to every fetch). API token calls are exempt: they don't use the
+    session cookie, so a cross-site page can't make them."""
+    if request.method in ("GET", "HEAD", "OPTIONS") or g.get("token"):
         return None
     sent = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token") or ""
     expected = session.get("csrf")
@@ -558,7 +590,7 @@ _NO_DB_EXEMPT_ENDPOINTS = {
     "static", "index", "api_db_status", "settings", "backup_settings", "setup", "upload_db", "sync_db",
     "sync_upload", "sync_cancel", "gdrive_setup", "gdrive_callback", "gdrive_paste", "gdrive_disconnect",
     "login", "first_account", "logout", "change_password", "users_page", "user_action", "healthz",
-    "manifest", "service_worker",
+    "manifest", "service_worker", "create_api_token", "revoke_api_token", "v1_status",
 }
 
 
@@ -827,6 +859,10 @@ def settings():
         if locale in dict(LOCALE_OPTIONS):
             current_store().save_config({"locale": locale})
         return redirect(url_for("settings"))
+    return _render_settings()
+
+
+def _render_settings(new_token=None):
     store = current_store()
     exists = store.db_exists()
     info = store.db_info()
@@ -854,7 +890,32 @@ def settings():
         gdrive_can_write=gdrive.can_write(store),
         gdrive_wants_write=gdrive.wants_write(store),
         gdrive_folder=gdrive.folder_name(store),
+        api_tokens=sorted(users.tokens(g.user).items(), key=lambda kv: kv[1].get("created", "")),
+        new_token=new_token,
     )
+
+
+@app.route("/settings/api-tokens", methods=["POST"])
+def create_api_token():
+    """Make a token and show it once, in this response: it isn't stored
+    anywhere it could be shown again (not even the session cookie)."""
+    try:
+        token = users.create_token(g.user, request.form.get("name"), write=request.form.get("write") == "1")
+    except users.UserError as e:
+        flash(str(e), "error")
+        return redirect(url_for("settings"))
+    return _render_settings(new_token=token)
+
+
+@app.route("/settings/api-tokens/<tid>/revoke", methods=["POST"])
+def revoke_api_token(tid):
+    try:
+        users.revoke_token(g.user, tid)
+    except users.UserError as e:
+        flash(str(e), "error")
+    else:
+        flash("Token revoked.", "ok")
+    return redirect(url_for("settings"))
 
 
 @app.route("/settings/backups", methods=["POST"])
@@ -1063,6 +1124,15 @@ def api_transaction_group_stats():
     )
 
 
+TX_SORT_OPTIONS = {
+    "date": "i.WDATE {dir}, CAST(i.ZDATE AS INTEGER) {dir}",
+    "amount": "i.AMOUNT_ACCOUNT {dir}",
+    "entered_amount": "i.IN_ZMONEY {dir}",
+    "account": "a.NIC_NAME COLLATE NOCASE {dir}",
+    "updated": "i.UTIME {dir}",
+}
+
+
 @app.route("/transactions")
 def transactions():
     f = parse_transaction_filters(request.args)
@@ -1155,20 +1225,13 @@ def transactions():
         )
     }
 
-    sort_options = {
-        "date": "i.WDATE {dir}, CAST(i.ZDATE AS INTEGER) {dir}",
-        "amount": "i.AMOUNT_ACCOUNT {dir}",
-        "entered_amount": "i.IN_ZMONEY {dir}",
-        "account": "a.NIC_NAME COLLATE NOCASE {dir}",
-        "updated": "i.UTIME {dir}",
-    }
     sort_by = request.args.get("sort", "date")
-    if sort_by not in sort_options:
+    if sort_by not in TX_SORT_OPTIONS:
         sort_by = "date"
     sort_dir = request.args.get("dir", "desc")
     if sort_dir not in ("asc", "desc"):
         sort_dir = "desc"
-    order_by = sort_options[sort_by].format(dir=sort_dir)
+    order_by = TX_SORT_OPTIONS[sort_by].format(dir=sort_dir)
 
     sql = f"""
         SELECT i.uid, i.WDATE, i.ZDATE AS zdate_ms, i.IS_DEL AS is_del,
@@ -1192,25 +1255,14 @@ def transactions():
     """
     rows = query(sql, params + [page_size, offset])
 
-    income_lookup = category_lookup(0)
-    expense_lookup = category_lookup(1)
+    lookups = {0: category_lookup(0), 1: category_lookup(1)}
 
     enriched = []
     for r in rows:
         d = dict(r)
         tree_type = 0 if d["DO_TYPE"] == "0" else 1
-        lookup = income_lookup if tree_type == 0 else expense_lookup
-        cat = lookup.get(d["category_uid"])
-        if cat:
-            root_uid = d["category_uid"] if cat["status"] == 0 else cat["parent_uid"]
-            root_name = lookup.get(root_uid, {}).get("name", "")
-            path = cat["name"] if cat["status"] == 0 else f'{root_name} > {cat["name"]}'
-        else:
-            root_uid = ""
-            path = ""
         d["tree_type"] = tree_type
-        d["root_uid"] = root_uid
-        d["category_path"] = path
+        d["root_uid"], d["category_path"] = category_path(lookups[tree_type], d["category_uid"])
         d["editable_category"] = d["DO_TYPE"] in ("0", "1")
         enriched.append(d)
 
@@ -1236,7 +1288,7 @@ def transactions():
         note_counts=note_counts, desc_counts=desc_counts,
         account_counts=account_counts, category_counts=category_counts,
         category_counts_own=category_counts_raw, type_counts=type_counts,
-        sort_options=list(sort_options.keys()),
+        sort_options=list(TX_SORT_OPTIONS),
         page=page,
         total_pages=total_pages,
         total_rows=total_rows,
@@ -1245,9 +1297,10 @@ def transactions():
     )
 
 
-@app.route("/accounts")
-def accounts():
-    sql = """
+def get_account_rows():
+    """Every account with its group, currency, live-row count and balance,
+    in the app's group/account order."""
+    return query("""
         SELECT a.uid, a.NIC_NAME, c.ISO, g.uid AS group_uid, g.ACC_GROUP_NAME,
                a.ORDERSEQ, a.TYPE AS account_type, a.ZDATA AS account_flags,
                a.CARD_ACCOUNT_NAME,
@@ -1264,8 +1317,12 @@ def accounts():
         LEFT JOIN INOUTCOME i ON i.assetUid = a.uid AND i.IS_DEL = 0
         GROUP BY a.uid
         ORDER BY g.ORDERSEQ, a.ORDERSEQ, a.NIC_NAME
-    """
-    rows = query(sql)
+    """)
+
+
+@app.route("/accounts")
+def accounts():
+    rows = get_account_rows()
     # Rows already arrive in group order (from ASSETGROUP.ORDERSEQ), so a
     # plain consecutive grouping preserves that -- unlike Jinja's `groupby`
     # filter, which would silently re-sort groups alphabetically.
@@ -1315,54 +1372,96 @@ CATEGORY_FIELDS = {"NAME", "ORDERSEQ"}
 BULK_TRANSACTION_FIELDS = {"ZCONTENT", "ZDATA", "ctgUid", "assetUid"}
 
 
-@app.route("/api/transactions", methods=["POST"])
-def api_add_transaction():
-    data = request.get_json(force=True)
+class ApiError(Exception):
+    """A bad API request: answered as {"ok": false, "error": message}."""
+
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.message, self.status = message, status
+
+
+@app.errorhandler(ApiError)
+def _api_error(e):
+    return jsonify(ok=False, error=e.message), e.status
+
+
+@app.errorhandler(404)
+@app.errorhandler(405)
+def _api_http_error(e):
+    if not _wants_json():
+        return e
+    resp = jsonify(ok=False, error=e.description)
+    resp.status_code = e.code
+    if getattr(e, "valid_methods", None):
+        resp.headers["Allow"] = ", ".join(e.valid_methods)
+    return resp
+
+
+def _parse_datetime(date_str, time_str):
+    """A "YYYY-MM-DD" date and optional "HH:MM[:SS]" time as a datetime."""
+    time_str = time_str or "00:00:00"
+    if not isinstance(date_str, str) or not isinstance(time_str, str):
+        raise ApiError("invalid date/time")
+    if time_str.count(":") == 1:
+        time_str += ":00"
+    try:
+        return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        raise ApiError("invalid date/time")
+
+
+def _check_category(uid, tree):
+    """uid must be a live category in that tree (0 income, 1 expense)."""
+    if not any(r["uid"] == uid for r in get_categories(type_filter=tree)):
+        raise ApiError("unknown category for this type")
+
+
+def _create_transaction(data):
+    """Insert a transaction (two linked rows for a transfer) from the add
+    form's fields and return its uid."""
     do_type = data.get("type", "")
     if do_type not in ("0", "1", "3", "7", "8"):
-        return jsonify(ok=False, error="invalid type"), 400
+        raise ApiError("invalid type")
 
     account_uid = data.get("account", "")
     account_rows = query("SELECT currencyUid FROM ASSETS WHERE uid = ?", (account_uid,))
     if not account_rows:
-        return jsonify(ok=False, error="unknown account"), 400
+        raise ApiError("unknown account")
     currency_uid = account_rows[0]["currencyUid"]
 
     is_transfer = do_type == "3"
     to_account_uid = data.get("to_account", "") if is_transfer else ""
     if is_transfer:
         if not to_account_uid or to_account_uid == account_uid:
-            return jsonify(ok=False, error="pick two different accounts for a transfer"), 400
+            raise ApiError("pick two different accounts for a transfer")
         to_account_rows = query("SELECT currencyUid FROM ASSETS WHERE uid = ?", (to_account_uid,))
         if not to_account_rows:
-            return jsonify(ok=False, error="unknown destination account"), 400
+            raise ApiError("unknown destination account")
         to_currency_uid = to_account_rows[0]["currencyUid"]
 
     try:
         amount = float(data.get("amount", ""))
     except (TypeError, ValueError):
-        return jsonify(ok=False, error="invalid amount"), 400
+        raise ApiError("invalid amount")
     if amount <= 0:
-        return jsonify(ok=False, error="amount must be positive"), 400
+        raise ApiError("amount must be positive")
 
     date_str = data.get("date", "")
-    time_str = data.get("time", "") or "00:00:00"
-    if time_str.count(":") == 1:
-        time_str += ":00"
-    try:
-        dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return jsonify(ok=False, error="invalid date/time"), 400
+    dt = _parse_datetime(date_str, data.get("time", ""))
 
     is_adjustment = do_type in ("7", "8")
     category_uid = "-4" if is_adjustment else ("" if is_transfer else data.get("category", ""))
-    if not is_adjustment and not is_transfer and not category_uid:
-        return jsonify(ok=False, error="category required"), 400
+    if not is_adjustment and not is_transfer:
+        if not category_uid:
+            raise ApiError("category required")
+        _check_category(category_uid, int(do_type))
 
-    note = data.get("note", "")
+    note = data.get("note", "") or ""
     if is_adjustment and not note:
         note = "Difference"
-    description = data.get("description", "")
+    description = data.get("description", "") or ""
+    if not isinstance(note, str) or not isinstance(description, str):
+        raise ApiError("note and description must be text")
 
     def currency_rate(uid_):
         rate_rows = query("SELECT RATE FROM CURRENCY WHERE uid = ?", (uid_,))
@@ -1399,7 +1498,7 @@ def api_add_transaction():
              mirror_uid, date_str, zdate, note, description, to_amount, to_amount, round(to_amount * to_rate, 2),
              to_account_uid, account_uid, to_currency_uid, tx_uid_trans, now_ms),
         )
-        return jsonify(ok=True, uid=uid, mtime=current_db_mtime())
+        return uid
 
     execute(
         """
@@ -1413,6 +1512,12 @@ def api_add_transaction():
          amount, amount, round(amount * rate, 2),
          account_uid, currency_uid, category_uid, now_ms),
     )
+    return uid
+
+
+@app.route("/api/transactions", methods=["POST"])
+def api_add_transaction():
+    uid = _create_transaction(request.get_json(force=True))
     return jsonify(ok=True, uid=uid, mtime=current_db_mtime())
 
 
@@ -1432,8 +1537,10 @@ def _fmt_money(x, decimals):
     return str(int(round(x))) if decimals == 0 else str(round(x, decimals))
 
 
-def _edit_transaction_amount(uid, value):
-    """Set AMOUNT_ACCOUNT and restate IN_ZMONEY and ZMONEY to match.
+def _amount_columns(uid, value, account_uid=None):
+    """The columns to write to set a row's AMOUNT_ACCOUNT: it, plus IN_ZMONEY
+    and ZMONEY restated to match. account_uid: the account the row is moving
+    to, if it is, whose currency's rate ZMONEY then uses.
 
     IN_ZMONEY keeps the row's existing entered/account ratio (the app's own
     conversion, e.g. the BGN peg), so it scales with the new amount. ZMONEY is
@@ -1443,19 +1550,19 @@ def _edit_transaction_amount(uid, value):
     try:
         new = float(value)
     except (TypeError, ValueError):
-        return jsonify(ok=False, error="invalid amount"), 400
+        raise ApiError("invalid amount")
     if new < 0:
-        return jsonify(ok=False, error="amount must not be negative"), 400
+        raise ApiError("amount must not be negative")
     rows = query(
         """SELECT i.AMOUNT_ACCOUNT, i.IN_ZMONEY, cu.DECIMAL_POINT AS tx_dec,
                   acu.RATE AS acct_rate
            FROM INOUTCOME i
-           LEFT JOIN ASSETS a ON a.uid = i.assetUid
+           LEFT JOIN ASSETS a ON a.uid = IFNULL(?, i.assetUid)
            LEFT JOIN CURRENCY acu ON acu.uid = a.currencyUid
            LEFT JOIN CURRENCY cu ON cu.uid = i.currencyUid
-           WHERE i.uid = ?""", (uid,))
+           WHERE i.uid = ?""", (account_uid, uid))
     if not rows:
-        return jsonify(ok=False, error="not found"), 404
+        raise ApiError("not found", 404)
     r = rows[0]
     try:
         old = float(r["AMOUNT_ACCOUNT"])
@@ -1464,18 +1571,25 @@ def _edit_transaction_amount(uid, value):
         old, old_in = 0.0, None
     tx_dec = r["tx_dec"] if r["tx_dec"] is not None else 2
     acct_rate = float(r["acct_rate"] or 1.0)
-    in_zmoney = None
+    cols = {"AMOUNT_ACCOUNT": new, "ZMONEY": _fmt_money(new * acct_rate, 2)}
     if old_in is not None:
-        in_zmoney = _fmt_money(old_in * new / old, tx_dec) if old else _fmt_money(new, tx_dec)
-    zmoney = _fmt_money(new * acct_rate, 2)
-    now_ms = int(datetime.now().timestamp() * 1000)
-    if in_zmoney is None:
-        execute("UPDATE INOUTCOME SET AMOUNT_ACCOUNT = ?, ZMONEY = ?, UTIME = ? WHERE uid = ?",
-                (new, zmoney, now_ms, uid))
-    else:
-        execute("UPDATE INOUTCOME SET AMOUNT_ACCOUNT = ?, IN_ZMONEY = ?, ZMONEY = ?, UTIME = ? WHERE uid = ?",
-                (new, in_zmoney, zmoney, now_ms, uid))
-    return jsonify(ok=True, mtime=current_db_mtime(), in_zmoney=in_zmoney, zmoney=zmoney)
+        cols["IN_ZMONEY"] = _fmt_money(old_in * new / old, tx_dec) if old else _fmt_money(new, tx_dec)
+    return cols
+
+
+def _now_ms():
+    return int(datetime.now().timestamp() * 1000)
+
+
+def _update_row(table, uid, cols):
+    """UPDATE one row by uid. Column names come from code, never the client."""
+    execute(f"UPDATE {table} SET {', '.join(f'{c} = ?' for c in cols)} WHERE uid = ?", [*cols.values(), uid])
+
+
+def _edit_transaction_amount(uid, value):
+    cols = _amount_columns(uid, value)
+    _update_row("INOUTCOME", uid, {**cols, "UTIME": _now_ms()})
+    return jsonify(ok=True, mtime=current_db_mtime(), in_zmoney=cols.get("IN_ZMONEY"), zmoney=cols["ZMONEY"])
 
 
 @app.route("/api/transactions/bulk", methods=["PATCH"])
@@ -1532,6 +1646,254 @@ def api_edit_category(uid, type_):
         return jsonify(ok=False, error="field not allowed"), 400
     execute(f"UPDATE ZCATEGORY SET {field} = ? WHERE uid = ? AND TYPE = ?", (value, uid, type_))
     return jsonify(ok=True, mtime=current_db_mtime())
+
+
+# ---------------------------------------------------------------------------
+# Routes - public API (/api/v1/, see docs/openapi.yaml)
+# ---------------------------------------------------------------------------
+
+TX_TYPE_NAMES = {
+    "0": "income", "1": "expense", "3": "transfer", "4": "transfer_mirror",
+    "7": "balance_increase", "8": "balance_decrease",
+}
+TX_TYPE_CODES = {name: code for code, name in TX_TYPE_NAMES.items()}
+ACCOUNT_STATUS_NAMES = {"0": "normal", "1": "deleted", "3": "hidden"}
+V1_PATCH_FIELDS = {"date", "time", "amount", "note", "description", "category", "account"}
+
+_V1_TX_SQL = """
+    SELECT i.uid, i.WDATE, i.ZDATE, i.DO_TYPE, i.IS_DEL, i.AMOUNT_ACCOUNT, i.IN_ZMONEY,
+           i.ZCONTENT, i.ZDATA, i.ctgUid, i.txUidTrans, i.UTIME,
+           time(CAST(i.ZDATE AS INTEGER) / 1000, 'unixepoch', 'localtime') AS tx_time,
+           cu.ISO AS currency_iso, acu.ISO AS account_currency_iso,
+           a.uid AS account_uid, a.NIC_NAME AS account_name,
+           ta.uid AS to_account_uid, ta.NIC_NAME AS to_account_name
+    FROM INOUTCOME i
+    LEFT JOIN ASSETS a     ON a.uid = i.assetUid
+    LEFT JOIN ASSETS ta    ON ta.uid = i.toAssetUid
+    LEFT JOIN CURRENCY cu  ON cu.uid = i.currencyUid
+    LEFT JOIN CURRENCY acu ON acu.uid = a.currencyUid
+"""
+
+
+def _num_or_none(v, cast=float):
+    try:
+        return cast(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _json_body():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        raise ApiError("send a JSON object")
+    return data
+
+
+def _int_arg(name, default, lo, hi=None):
+    raw = request.args.get(name, "")
+    if raw == "":
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        raise ApiError(f"{name} must be a whole number")
+    if v < lo or (hi is not None and v > hi):
+        raise ApiError(f"{name} must be from {lo}" + (f" to {hi}" if hi is not None else " up"))
+    return v
+
+
+def _v1_transaction(r, lookups):
+    do_type = r["DO_TYPE"]
+    _, path = category_path(lookups[0 if do_type == "0" else 1], r["ctgUid"])
+    return {
+        "uid": r["uid"],
+        "type": TX_TYPE_NAMES.get(do_type, do_type),
+        "date": r["WDATE"],
+        "time": r["tx_time"],
+        "timestamp_ms": _num_or_none(r["ZDATE"], int),
+        "amount": _num_or_none(r["AMOUNT_ACCOUNT"]),
+        "currency": r["account_currency_iso"],
+        "entered_amount": _num_or_none(r["IN_ZMONEY"]),
+        "entered_currency": r["currency_iso"],
+        "account_uid": r["account_uid"],
+        "account": r["account_name"],
+        "to_account_uid": r["to_account_uid"],
+        "to_account": r["to_account_name"],
+        "category_uid": r["ctgUid"] or None,
+        "category": path or None,
+        "note": r["ZCONTENT"] or "",
+        "description": r["ZDATA"] or "",
+        "transfer_id": r["txUidTrans"] or None,
+        "deleted": r["IS_DEL"] not in (None, 0, "0", ""),
+        "updated_ms": _num_or_none(r["UTIME"], int),
+    }
+
+
+def _category_lookups():
+    return {0: category_lookup(0), 1: category_lookup(1)}
+
+
+def _v1_get_transaction(uid):
+    rows = query(_V1_TX_SQL + " WHERE i.uid = ?", (uid,))
+    if not rows:
+        raise ApiError("not found", 404)
+    return _v1_transaction(rows[0], _category_lookups())
+
+
+@app.route("/api/v1/status")
+def v1_status():
+    store = current_store()
+    return jsonify(
+        ok=True, user=g.user, auth="token" if g.token else "proxy" if g.via_proxy else "session",
+        can_write=bool(g.token["write"]) if g.token else True,
+        database={"name": store.db_info().get("name"), "mtime": current_db_mtime()} if store.db_exists() else None,
+    )
+
+
+@app.route("/api/v1/accounts")
+def v1_accounts():
+    return jsonify(ok=True, accounts=[{
+        "uid": r["uid"],
+        "name": r["NIC_NAME"],
+        "group_uid": r["group_uid"],
+        "group": r["ACC_GROUP_NAME"],
+        "currency": r["ISO"],
+        "balance": r["balance"] or 0,
+        "transaction_count": r["tx_count"],
+        "status": ACCOUNT_STATUS_NAMES.get(str(r["account_flags"]), "other"),
+    } for r in get_account_rows()])
+
+
+@app.route("/api/v1/categories")
+def v1_categories():
+    return jsonify(ok=True, income=build_category_tree(0), expense=build_category_tree(1))
+
+
+@app.route("/api/v1/currencies")
+def v1_currencies():
+    rows = query("SELECT uid, ISO, RATE, DECIMAL_POINT FROM CURRENCY ORDER BY ISO")
+    return jsonify(ok=True, currencies=[{
+        "uid": r["uid"], "iso": r["ISO"], "rate": _num_or_none(r["RATE"]),
+        "decimals": _num_or_none(r["DECIMAL_POINT"], int),
+    } for r in rows])
+
+
+@app.route("/api/v1/transactions")
+def v1_transactions():
+    """The /transactions filters, as the same query-string parameters, with
+    limit/offset paging."""
+    f = parse_transaction_filters(request.args)
+    where, params = f["build_where"]()
+    limit = _int_arg("limit", 100, 1, 1000)
+    offset = _int_arg("offset", 0, 0)
+    sort_by = request.args.get("sort", "date")
+    sort_dir = request.args.get("dir", "desc")
+    if sort_by not in TX_SORT_OPTIONS:
+        raise ApiError(f"sort must be one of: {', '.join(TX_SORT_OPTIONS)}")
+    if sort_dir not in ("asc", "desc"):
+        raise ApiError("dir must be asc or desc")
+    total = query(f"SELECT COUNT(*) AS n FROM INOUTCOME i WHERE {where}", params)[0]["n"]
+    rows = query(
+        f"{_V1_TX_SQL} WHERE {where} ORDER BY {TX_SORT_OPTIONS[sort_by].format(dir=sort_dir)}, i.uid LIMIT ? OFFSET ?",
+        params + [limit, offset],
+    )
+    lookups = _category_lookups()
+    return jsonify(ok=True, total=total, limit=limit, offset=offset,
+                   transactions=[_v1_transaction(r, lookups) for r in rows])
+
+
+@app.route("/api/v1/transactions/<uid>")
+def v1_transaction(uid):
+    return jsonify(ok=True, transaction=_v1_get_transaction(uid))
+
+
+@app.route("/api/v1/transactions", methods=["POST"])
+def v1_add_transaction():
+    """Same fields as the add form; type may also be a name, and a missing
+    date means now."""
+    data = dict(_json_body())
+    data["type"] = TX_TYPE_CODES.get(data.get("type"), data.get("type"))
+    if data["type"] == "4":
+        raise ApiError("add a transfer as type transfer; its mirror row is made for you")
+    if not data.get("date"):
+        now = datetime.now()
+        data["date"], data["time"] = now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S")
+    uid = _create_transaction(data)
+    return jsonify(ok=True, transaction=_v1_get_transaction(uid)), 201
+
+
+@app.route("/api/v1/transactions/<uid>", methods=["PATCH"])
+def v1_edit_transaction(uid):
+    """Change any of V1_PATCH_FIELDS in one go. Transfers keep their
+    accounts (delete and re-add to move one), and only income and expense
+    rows have a category."""
+    data = _json_body()
+    unknown = set(data) - V1_PATCH_FIELDS
+    if unknown:
+        raise ApiError(f"can't change: {', '.join(sorted(unknown))}")
+    if not data:
+        raise ApiError("nothing to change")
+    rows = query("SELECT DO_TYPE, WDATE, ZDATE, AMOUNT_ACCOUNT FROM INOUTCOME WHERE uid = ?", (uid,))
+    if not rows:
+        raise ApiError("not found", 404)
+    row = rows[0]
+    do_type = row["DO_TYPE"]
+    cols = {}
+    for key, col in (("note", "ZCONTENT"), ("description", "ZDATA")):
+        if key in data:
+            if not isinstance(data[key], str):
+                raise ApiError(f"{key} must be text")
+            cols[col] = data[key]
+    if "category" in data:
+        if do_type not in ("0", "1"):
+            raise ApiError("only income and expense transactions have a category")
+        _check_category(data["category"], int(do_type))
+        cols["ctgUid"] = data["category"]
+    if "account" in data:
+        if do_type in ("3", "4"):
+            raise ApiError("a transfer's accounts can't be changed; delete it and add a new one")
+        if not query("SELECT 1 FROM ASSETS WHERE uid = ?", (data["account"],)):
+            raise ApiError("unknown account")
+        cols["assetUid"] = data["account"]
+    if "date" in data or "time" in data:
+        old_ms = _num_or_none(row["ZDATE"], int)
+        old_time = datetime.fromtimestamp(old_ms / 1000).strftime("%H:%M:%S") if old_ms is not None else ""
+        dt = _parse_datetime(data.get("date", row["WDATE"]), data.get("time", old_time))
+        cols["WDATE"], cols["ZDATE"] = dt.strftime("%Y-%m-%d"), str(int(dt.timestamp() * 1000))
+    if "amount" in data or "account" in data:
+        # A new account can mean a new currency rate, so ZMONEY is restated too.
+        cols.update(_amount_columns(uid, data.get("amount", row["AMOUNT_ACCOUNT"]), data.get("account")))
+    _update_row("INOUTCOME", uid, {**cols, "UTIME": _now_ms()})
+    return jsonify(ok=True, transaction=_v1_get_transaction(uid))
+
+
+def _linked_uids(uid):
+    """uid plus every row tied to it by txUidTrans/txUidFee (a transfer's
+    two legs and its fee): the merge treats them as one transaction."""
+    uids, links = {uid}, set()
+    while True:
+        marks = ",".join("?" for _ in uids)
+        rows = query(f"SELECT uid, txUidTrans, txUidFee FROM INOUTCOME WHERE uid IN ({marks})", list(uids))
+        new_links = {r[c] for r in rows for c in ("txUidTrans", "txUidFee") if r[c]} - links
+        if not new_links:
+            return uids
+        links |= new_links
+        marks = ",".join("?" for _ in links)
+        uids |= {r["uid"] for r in query(
+            f"SELECT uid FROM INOUTCOME WHERE txUidTrans IN ({marks}) OR txUidFee IN ({marks})",
+            list(links) * 2)}
+
+
+@app.route("/api/v1/transactions/<uid>", methods=["DELETE"])
+def v1_delete_transaction(uid):
+    """Soft-delete (IS_DEL = 1), like the app: the row stays, and sync
+    carries the deletion over. A transfer goes with its other leg and fee."""
+    if not query("SELECT 1 FROM INOUTCOME WHERE uid = ?", (uid,)):
+        raise ApiError("not found", 404)
+    uids = sorted(_linked_uids(uid))
+    marks = ",".join("?" for _ in uids)
+    execute(f"UPDATE INOUTCOME SET IS_DEL = 1, UTIME = ? WHERE uid IN ({marks})", [_now_ms(), *uids])
+    return jsonify(ok=True, deleted=uids)
 
 
 if not users.has_users():

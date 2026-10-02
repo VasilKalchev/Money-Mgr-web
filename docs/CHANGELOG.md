@@ -7,6 +7,11 @@ Notable changes to Money Mgr web. The format follows
 
 ### Added
 
+- A JSON API at `/api/v1/` for scripts and other apps: list and filter
+  transactions, read accounts, categories and currencies, and add, edit and
+  delete transactions. Each user makes read-only or read-write tokens under
+  **Settings > API tokens**. Documented as an OpenAPI spec in
+  `docs/openapi.yaml`.
 - Two-way sync with the Money Manager app. Syncing merges the app's newer
   backup into the database here instead of replacing it: new transactions
   from the app come in, and edits, renames and transactions added here are

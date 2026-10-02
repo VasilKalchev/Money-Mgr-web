@@ -28,7 +28,9 @@ user created.
 
 ## Auth, CSRF and headers
 
-- Auth (`_authenticate()` before_request): a trusted proxy header
+- Auth (`_authenticate()` before_request): on `/api/v1/`, an
+  `Authorization: Bearer` API token (`users.user_for_token()`; read-only
+  tokens get 403 on non-GET) wins and skips CSRF; otherwise a trusted proxy header
   (`MMW_AUTH_HEADER`, honored only from `MMW_TRUSTED_PROXIES` addresses/CIDRs;
   unknown names get a password-less account) wins, else the Flask session
   (`user` + `ver`, which must match the user's `session_version`; bumping
@@ -46,7 +48,18 @@ user created.
 - CSRF (`_check_csrf()`): every non-GET request needs the session token,
   as a `csrf_token` form field (`{{ csrf_token() }}`) or the
   `X-CSRF-Token` header, which `base.html` adds to every same-origin
-  `fetch`.
+  `fetch`. API token calls are exempt.
+
+## API routes
+
+- `/api/...` (no version): the pages' own JSON helpers, session-only, free
+  to change with the templates.
+- `/api/v1/...`: the public API, documented in `docs/openapi.yaml`; keep
+  it in step (`tests/test_openapi.py` checks the spec against the routes
+  and their responses) and don't make breaking changes to the API. It reuses the page code
+  (`parse_transaction_filters`, `_create_transaction`, `_amount_columns`,
+  `get_account_rows`). Raise `ApiError(message, status)` for bad input;
+  it's answered as `{"ok": false, "error": ...}`, as are 404/405 under `/api/`.
 
 ## Supported databases
 

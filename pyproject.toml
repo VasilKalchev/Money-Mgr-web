@@ -13,6 +13,9 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "pyyaml>=6",
+    "jsonschema>=4.18",
+    "openapi-spec-validator>=0.7",
 ]
 
 [tool.uv]

@@ -1,13 +1,17 @@
 """User accounts, kept in app.json under "users":
 
     {"<name>": {"password_hash": "...", "admin": true, "created": "...",
-                "session_version": 1}}
+                "session_version": 1,
+                "api_tokens": {"<id>": {"name": "...", "hash": "...", "write": false,
+                                        "created": "...", "last_used": "..."}}}}
 
 A user's data lives in dbstore.store_for(name). password_hash is "" for
 users created by the trusted proxy header who never set a password; they
 can't log in with the form. Bumping session_version logs out every
-session of that user (password change, removal).
+session of that user (password change, removal). API tokens are separate
+from the password and stay valid until revoked or the user is removed.
 """
+import hashlib
 import hmac
 import os
 import re
@@ -161,6 +165,90 @@ def verify(name, password):
 
 
 _DUMMY_HASH = generate_password_hash("not a real password")
+
+
+# ---------------------------------------------------------------------------
+# API tokens
+# ---------------------------------------------------------------------------
+
+# "mmw_<id>_<secret>": the id finds the record, only a SHA-256 of the whole
+# token is stored (the secret is random, so a slow hash adds nothing).
+TOKEN_PREFIX = "mmw_"
+TOKEN_NAME_MAX = 64
+MAX_TOKENS = 50
+# last_used is rewritten at most this often, not on every request.
+TOKEN_TOUCH_SECONDS = 60
+
+
+def _token_hash(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def tokens(name):
+    """{id: record} for a user, without the hashes."""
+    return {tid: {k: v for k, v in t.items() if k != "hash"}
+            for tid, t in ((get(name) or {}).get("api_tokens") or {}).items()}
+
+
+def create_token(name, label, write=False):
+    """Make a token for the user and return it. It's only ever shown now."""
+    label = (label or "").strip()
+    if not label or len(label) > TOKEN_NAME_MAX:
+        raise UserError(f"Give the token a name of 1-{TOKEN_NAME_MAX} characters.")
+    tid = secrets.token_hex(4)
+    token = f"{TOKEN_PREFIX}{tid}_{secrets.token_urlsafe(32)}"
+
+    def add(cfg):
+        toks = cfg["users"][name].setdefault("api_tokens", {})
+        if len(toks) >= MAX_TOKENS:
+            raise UserError(f"You already have {MAX_TOKENS} tokens. Revoke some first.")
+        toks[tid] = {
+            "name": label, "hash": _token_hash(token), "write": bool(write),
+            "created": datetime.now().isoformat(timespec="seconds"), "last_used": "",
+        }
+
+    dbstore.update_app_config(add)
+    return token
+
+
+def revoke_token(name, tid):
+    def drop(cfg):
+        if (cfg["users"][name].get("api_tokens") or {}).pop(tid, None) is None:
+            raise UserError("No such token.")
+
+    dbstore.update_app_config(drop)
+
+
+def user_for_token(token):
+    """(username, token id, record) for a valid token, else None. Bumps the
+    token's last_used now and then."""
+    token = (token or "").strip()
+    if not token.startswith(TOKEN_PREFIX):
+        return None
+    tid = token[len(TOKEN_PREFIX):].split("_", 1)[0]
+    want = _token_hash(token)
+    for name, u in all_users().items():
+        t = (u.get("api_tokens") or {}).get(tid)
+        if t and hmac.compare_digest(t.get("hash", ""), want):
+            _touch_token(name, tid, t)
+            return name, tid, t
+    return None
+
+
+def _touch_token(name, tid, t):
+    now = datetime.now()
+    try:
+        if (now - datetime.fromisoformat(t.get("last_used") or "")).total_seconds() < TOKEN_TOUCH_SECONDS:
+            return
+    except ValueError:
+        pass
+
+    def touch(cfg):
+        rec = ((cfg.get("users") or {}).get(name, {}).get("api_tokens") or {}).get(tid)
+        if rec:
+            rec["last_used"] = now.isoformat(timespec="seconds")
+
+    dbstore.update_app_config(touch)
 
 
 # ---------------------------------------------------------------------------

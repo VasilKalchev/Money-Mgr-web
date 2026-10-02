@@ -19,7 +19,8 @@ CREATE TABLE INOUTCOME (AID INTEGER PRIMARY KEY, ASSET_GROUP INTEGER, ASSET_ID I
   toAssetUid TEXT, isSynced integer, lat TEXT, lng TEXT, gstd TEXT, wtime TEXT, paid TEXT);
 CREATE UNIQUE INDEX UNIQUE_IDX_INOUTCOME_UID ON INOUTCOME (uid);
 CREATE TABLE ASSETS (ID integer primary key autoincrement, NIC_NAME varchar, ORDERSEQ integer,
-  TYPE integer, ZDATA varchar, AMOUNT varchar, uid TEXT, currencyUid TEXT, groupUid TEXT);
+  TYPE integer, ZDATA varchar, AMOUNT varchar, CARD_ACCOUNT_NAME varchar, A_UTIME INTEGER, uid TEXT,
+  currencyUid TEXT, groupUid TEXT);
 CREATE TABLE ASSETGROUP (DEVICE_ID INTEGER PRIMARY KEY autoincrement, ACC_GROUP_NAME VARCHAR,
   ORDERSEQ INTEGER, uid TEXT);
 CREATE TABLE CURRENCY (ID integer primary key autoincrement, ISO varchar, RATE real,

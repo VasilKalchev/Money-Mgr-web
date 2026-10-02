@@ -19,6 +19,10 @@ Add a test next to the code you change:
 - `test_sync.py`: sync flows and routes, against the in-memory Drive in
   `fakedrive.py`
 - `test_security.py`: auth, CSRF, proxy trust
+- `test_api.py`: `/api/v1/` and API tokens (the `api` fixture is a
+  cookie-less client with a read-write token)
+- `test_openapi.py`: `docs/openapi.yaml` lists exactly the `/api/v1/`
+  routes and real responses fit its schemas
 - `test_pwa.py`: manifest, service worker
 
 ## Ad-hoc checks against real data
