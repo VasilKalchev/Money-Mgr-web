@@ -5,8 +5,12 @@ Notable changes to Money Mgr web. The format follows
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-02
+
 ### Added
 
+- Prebuilt Docker images for amd64 and arm64 at
+  `ghcr.io/vasilkalchev/money-mgr-web`.
 - A JSON API at `/api/v1/` for scripts and other apps: list and filter
   transactions, read accounts, categories and currencies, and add, edit and
   delete transactions. Each user makes read-only or read-write tokens under
