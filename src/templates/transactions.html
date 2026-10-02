@@ -1,0 +1,1430 @@
+{% extends "base.html" %}
+{% block title %}Transactions{% endblock %}
+{% block content %}
+
+<script id="category-trees" type="application/json">{{ category_trees | tojson }}</script>
+<script id="accounts-data" type="application/json">{{ accounts_json | tojson }}</script>
+
+<form method="get" id="filter-form">
+  <input type="hidden" name="page_size" value="{{ page_size }}">
+
+  <div class="filters filter-group">
+    <span class="filter-group-label">Account &amp; category</span>
+
+    <div class="check-dropdown" data-label="account" data-placeholder="All accounts">
+      <button type="button" class="btn-secondary check-dropdown-toggle">All accounts</button>
+      <div class="check-dropdown-panel" hidden>
+        {% for group_name, group_accounts in accounts_grouped %}
+        <div class="check-dropdown-group">{{ group_name or '(no group)' }}</div>
+        {% for a in group_accounts %}
+        <label><input type="checkbox" name="account" value="{{ a.uid }}" {{ 'checked' if a.uid in filters.account }}> {{ a.NIC_NAME }} ({{ a.ISO }}) &mdash; {{ account_counts.get(a.uid, 0) }}</label>
+        {% endfor %}
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="check-dropdown" data-label="category" data-placeholder="All categories">
+      <button type="button" class="btn-secondary check-dropdown-toggle">All categories</button>
+      <div class="check-dropdown-panel" hidden>
+        <div class="check-dropdown-group">Income</div>
+        {% for r in category_trees[0] %}
+        {% if r.children %}
+        <label class="check-dropdown-root" title="Click to cycle: with subcategories &rarr; this category only &rarr; off"><input type="checkbox" class="tri-state" value="{{ r.uid }}"
+          {%- if r.uid in filters.category_only %} name="category_only" data-state="only" checked
+          {%- elif r.uid in filters.category %} name="category" data-state="all" checked
+          {%- else %} name="category" data-state="off"{% endif %}> {{ r.name }}<span class="tri-state-only"> (only)</span> &mdash; <span class="tri-state-count" data-all="{{ category_counts.get(r.uid, 0) }}" data-only="{{ category_counts_own.get(r.uid, 0) }}">{{ category_counts_own.get(r.uid, 0) if r.uid in filters.category_only else category_counts.get(r.uid, 0) }}</span></label>
+        {% else %}
+        <label><input type="checkbox" name="category" value="{{ r.uid }}" {{ 'checked' if r.uid in filters.category }}> {{ r.name }} &mdash; {{ category_counts.get(r.uid, 0) }}</label>
+        {% endif %}
+        {% for c in r.children %}
+        <label class="check-dropdown-child"><input type="checkbox" name="category" value="{{ c.uid }}" {{ 'checked' if c.uid in filters.category }}> {{ c.name }} &mdash; {{ category_counts.get(c.uid, 0) }}</label>
+        {% endfor %}
+        {% endfor %}
+        <div class="check-dropdown-group">Expense</div>
+        {% for r in category_trees[1] %}
+        {% if r.children %}
+        <label class="check-dropdown-root" title="Click to cycle: with subcategories &rarr; this category only &rarr; off"><input type="checkbox" class="tri-state" value="{{ r.uid }}"
+          {%- if r.uid in filters.category_only %} name="category_only" data-state="only" checked
+          {%- elif r.uid in filters.category %} name="category" data-state="all" checked
+          {%- else %} name="category" data-state="off"{% endif %}> {{ r.name }}<span class="tri-state-only"> (only)</span> &mdash; <span class="tri-state-count" data-all="{{ category_counts.get(r.uid, 0) }}" data-only="{{ category_counts_own.get(r.uid, 0) }}">{{ category_counts_own.get(r.uid, 0) if r.uid in filters.category_only else category_counts.get(r.uid, 0) }}</span></label>
+        {% else %}
+        <label><input type="checkbox" name="category" value="{{ r.uid }}" {{ 'checked' if r.uid in filters.category }}> {{ r.name }} &mdash; {{ category_counts.get(r.uid, 0) }}</label>
+        {% endif %}
+        {% for c in r.children %}
+        <label class="check-dropdown-child"><input type="checkbox" name="category" value="{{ c.uid }}" {{ 'checked' if c.uid in filters.category }}> {{ c.name }} &mdash; {{ category_counts.get(c.uid, 0) }}</label>
+        {% endfor %}
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="check-dropdown" data-label="type" data-placeholder="All types">
+      <button type="button" class="btn-secondary check-dropdown-toggle">All types</button>
+      <div class="check-dropdown-panel" hidden>
+        {% for v, lbl in [('1','Expense'), ('0','Income'), ('3','Transfer'), ('7','Adjustment +'), ('8','Adjustment -')] %}
+        <label><input type="checkbox" name="type" value="{{ v }}" {{ 'checked' if v in filters.type }}> {{ lbl }} &mdash; {{ type_counts.get(v, 0) }}</label>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <div class="filters filter-group">
+    <span class="filter-group-label">Date range</span>
+    <input type="text" inputmode="numeric" name="from" id="date-from" value="{{ filters.date_from }}" placeholder="From (YYYY-MM-DD)" pattern="\d{4}-\d{2}-\d{2}" title="YYYY-MM-DD" style="width:120px;">
+    <input type="text" inputmode="numeric" name="to" id="date-to" value="{{ filters.date_to }}" placeholder="To (YYYY-MM-DD)" pattern="\d{4}-\d{2}-\d{2}" title="YYYY-MM-DD" style="width:120px;">
+    <select id="quick-range" title="Quickly fill From/To and apply immediately" onchange="applyQuickRange(this.value)">
+      <option value="">Quick range&hellip;</option>
+      <option value="today">Today</option>
+      <option value="this_week">This week</option>
+      <option value="last_week">Last week</option>
+      <option value="this_month">This month</option>
+      <option value="last_month">Last month</option>
+      <option value="this_quarter">This quarter</option>
+      <option value="last_quarter">Last quarter</option>
+      <option value="this_year">This year</option>
+      <option value="last_year">Last year</option>
+      <option value="last_7">Last 7 days</option>
+      <option value="last_30">Last 30 days</option>
+      <option value="last_90">Last 90 days</option>
+    </select>
+    <select id="quick-year" class="adv" title="Pick a specific year, applies immediately once a period is also chosen" onchange="maybeApplyYearPeriod()">
+      <option value="">Year&hellip;</option>
+      {% for y in tx_years %}
+      <option value="{{ y }}">{{ y }}</option>
+      {% endfor %}
+    </select>
+    <select id="quick-period" class="adv" title="Pick a period within the selected year" onchange="maybeApplyYearPeriod()">
+      <option value="year">Whole year</option>
+      <option value="q1">Q1 (Jan&ndash;Mar)</option>
+      <option value="q2">Q2 (Apr&ndash;Jun)</option>
+      <option value="q3">Q3 (Jul&ndash;Sep)</option>
+      <option value="q4">Q4 (Oct&ndash;Dec)</option>
+      <option value="1">January</option>
+      <option value="2">February</option>
+      <option value="3">March</option>
+      <option value="4">April</option>
+      <option value="5">May</option>
+      <option value="6">June</option>
+      <option value="7">July</option>
+      <option value="8">August</option>
+      <option value="9">September</option>
+      <option value="10">October</option>
+      <option value="11">November</option>
+      <option value="12">December</option>
+    </select>
+  </div>
+
+  <div class="filters filter-group">
+    <span class="filter-group-label">Text search</span>
+    <input type="text" name="q_note" value="{{ filters.q_note }}" placeholder="Search note... (! to exclude)" title="Prefix with ! to exclude matches, e.g. !refund">
+    <input type="text" name="q_desc" value="{{ filters.q_desc }}" placeholder="Search description... (! to exclude)" title="Prefix with ! to exclude matches, e.g. !refund">
+    <select name="has_note" class="adv {{ 'adv-active' if filters.has_note }}" title="Filter on whether the note (ZCONTENT) is empty">
+      <option value="">Note: any</option>
+      <option value="yes" {{ 'selected' if filters.has_note == 'yes' }}>Note: has &mdash; {{ note_counts.yes }}</option>
+      <option value="no" {{ 'selected' if filters.has_note == 'no' }}>Note: doesn't have &mdash; {{ note_counts.no }}</option>
+    </select>
+    <select name="has_desc" class="adv {{ 'adv-active' if filters.has_desc }}" title="Filter on whether the description (ZDATA) is empty">
+      <option value="">Description: any</option>
+      <option value="yes" {{ 'selected' if filters.has_desc == 'yes' }}>Description: has &mdash; {{ desc_counts.yes }}</option>
+      <option value="no" {{ 'selected' if filters.has_desc == 'no' }}>Description: doesn't have &mdash; {{ desc_counts.no }}</option>
+    </select>
+  </div>
+
+  <div class="filters filter-group adv {{ 'adv-active' if filters.amount_min or filters.amount_max or filters.entered_currency }}">
+    <span class="filter-group-label">Amount</span>
+    <input type="number" step="0.01" name="amount_min" value="{{ filters.amount_min }}" placeholder="Amount min" style="width:110px;">
+    <input type="number" step="0.01" name="amount_max" value="{{ filters.amount_max }}" placeholder="Amount max" style="width:110px;">
+    <select name="entered_currency" title="INOUTCOME.currencyUid: the currency the amount was originally entered in">
+      <option value="">All entered currencies</option>
+      {% for c in currencies %}
+      <option value="{{ c.uid }}" {{ 'selected' if filters.entered_currency == c.uid }}>{{ c.ISO }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="filters filter-group adv {{ 'adv-active' if filters.sort != 'date' or filters.dir != 'desc' or filters.show_deleted != 'hide' or filters.show_mirror != 'hide' }}">
+    <span class="filter-group-label">Sort &amp; visibility</span>
+    <select name="sort" title="Sort order">
+      {% for opt, label in [('date','Sort: Date/time'), ('amount','Sort: Amount'), ('entered_amount','Sort: Entered amount'), ('account','Sort: Account'), ('updated','Sort: Last updated')] %}
+      <option value="{{ opt }}" {{ 'selected' if filters.sort == opt }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <select name="dir" title="Sort direction">
+      <option value="desc" {{ 'selected' if filters.dir == 'desc' }}>Descending</option>
+      <option value="asc" {{ 'selected' if filters.dir == 'asc' }}>Ascending</option>
+    </select>
+    <select name="show_deleted" title="Rows with INOUTCOME.IS_DEL <> 0 are soft-deleted rows the app keeps but never shows">
+      <option value="hide" {{ 'selected' if filters.show_deleted == 'hide' }}>Deleted rows: hide</option>
+      <option value="show" {{ 'selected' if filters.show_deleted == 'show' }}>Deleted rows: show &mdash; {{ deleted_count }}</option>
+      <option value="only" {{ 'selected' if filters.show_deleted == 'only' }}>Deleted rows: only &mdash; {{ deleted_count }}</option>
+    </select>
+    <select name="show_mirror" title="DO_TYPE='4' rows are the mirror/receiving leg of a transfer, auto-created alongside the DO_TYPE='3' leg.">
+      <option value="hide" {{ 'selected' if filters.show_mirror == 'hide' }}>Transfer mirror legs: hide</option>
+      <option value="show" {{ 'selected' if filters.show_mirror == 'show' }}>Transfer mirror legs: show &mdash; {{ mirror_count }}</option>
+      <option value="only" {{ 'selected' if filters.show_mirror == 'only' }}>Transfer mirror legs: only &mdash; {{ mirror_count }}</option>
+    </select>
+  </div>
+
+  <div class="filters filter-group">
+    <button type="submit">Filter</button>
+    <a href="/transactions" class="btn-secondary" style="padding:6px 14px;">Reset</a>
+    <button type="button" class="btn-secondary adv-toggle" onclick="toggleAdvanced()" title="Show or hide the less common filters and tools">Advanced</button>
+  </div>
+</form>
+
+<datalist id="note-suggestions">
+  {% for v in note_suggestions %}<option value="{{ v }}">{% endfor %}
+</datalist>
+<datalist id="desc-suggestions">
+  {% for v in desc_suggestions %}<option value="{{ v }}">{% endfor %}
+</datalist>
+
+<div class="filters adv" style="margin-bottom: 8px;">
+  <label class="muted">
+    <input type="checkbox" id="group-toggle"> Group transactions
+  </label>
+  <input type="number" id="group-seconds" value="60" min="1" style="width:64px;" title="Rows from the same account within this many seconds of each other are visually clustered">
+  <span class="muted">seconds apart, same account</span>
+  <span id="group-stats" class="muted" title="Computed across every matching transaction, not just what's loaded on this page"></span>
+</div>
+
+<div class="filters" id="bulk-bar" style="display:none; justify-content: space-between;">
+  <div>
+    <strong id="bulk-count">0</strong> <span class="muted" id="bulk-scope-label">selected on this page</span>
+    <button type="button" class="btn-secondary" id="select-all-matching-btn" onclick="selectAllMatching()" style="display:none;"></button>
+    <button type="button" class="btn-secondary" onclick="clearSelection()">Clear</button>
+  </div>
+  <div style="display:flex; gap:8px; align-items:center;">
+    <select id="bulk-field" onchange="onBulkFieldChange()">
+      <option value="assetUid">Account</option>
+      <option value="ctgUid">Category</option>
+      <option value="ZCONTENT">Note</option>
+      <option value="ZDATA">Description</option>
+    </select>
+    <span id="bulk-value-widgets"></span>
+    <button type="button" class="btn-primary" onclick="applyBulkEdit()">Apply to selected</button>
+  </div>
+</div>
+
+<div class="filters" id="pagination-top" style="justify-content: space-between; padding: 6px 12px; font-size: 12px;">
+  <div>
+    <select id="page-size-select-top" onchange="changePageSize(this.value)" style="padding:3px 6px; font-size:12px;">
+      {% for opt in page_size_options %}
+      <option value="{{ opt }}" {{ 'selected' if opt == page_size }}>{{ opt }}/page</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="muted"><span class="js-num" data-raw="{{ total_rows }}">{{ total_rows | num }}</span> matching transactions</div>
+  <div>
+    <button type="button" class="btn-secondary" style="padding:3px 8px; font-size:12px;" onclick="gotoPage(1)" {{ 'disabled' if page == 1 }}>&laquo;</button>
+    <button type="button" class="btn-secondary" style="padding:3px 8px; font-size:12px;" onclick="gotoPage({{ page - 1 }})" {{ 'disabled' if page == 1 }}>&lsaquo;</button>
+    <span class="muted">{{ page }} / {{ total_pages }}</span>
+    <button type="button" class="btn-secondary" style="padding:3px 8px; font-size:12px;" onclick="gotoPage({{ page + 1 }})" {{ 'disabled' if page == total_pages }}>&rsaquo;</button>
+    <button type="button" class="btn-secondary" style="padding:3px 8px; font-size:12px;" onclick="gotoPage({{ total_pages }})" {{ 'disabled' if page == total_pages }}>&raquo;</button>
+  </div>
+</div>
+
+<div class="table-scroll table-add-wrap">
+  <div id="table-add-bar">
+    <button type="button" class="btn-primary" id="add-tx-toggle" onclick="toggleAddForm()">+ Add transaction</button>
+    <form id="add-tx-form" style="display:none;" onsubmit="return submitAddTx(event)">
+      <select name="type" id="add-type">
+        <option value="1">Expense</option>
+        <option value="0">Income</option>
+        <option value="3">Transfer</option>
+        <option value="7">Adjustment +</option>
+        <option value="8">Adjustment -</option>
+      </select>
+      <select name="account" id="add-account" required>
+        <option value="">Account&hellip;</option>
+        {% for group_name, group_accounts in accounts_grouped %}
+        <optgroup label="{{ group_name or '(no group)' }}">
+          {% for a in group_accounts %}
+          <option value="{{ a.uid }}">{{ a.NIC_NAME }} ({{ a.ISO }})</option>
+          {% endfor %}
+        </optgroup>
+        {% endfor %}
+      </select>
+      <span id="add-to-account-wrap" style="display:none;">
+        <span class="muted">&rarr;</span>
+        <select id="add-to-account">
+          <option value="">To account&hellip;</option>
+          {% for group_name, group_accounts in accounts_grouped %}
+          <optgroup label="{{ group_name or '(no group)' }}">
+            {% for a in group_accounts %}
+            <option value="{{ a.uid }}">{{ a.NIC_NAME }} ({{ a.ISO }})</option>
+            {% endfor %}
+          </optgroup>
+          {% endfor %}
+        </select>
+      </span>
+      <span id="add-category-wrap">
+        <select class="root-select" id="add-root"></select>
+        <select class="sub-select" id="add-sub"></select>
+      </span>
+      <input type="text" inputmode="numeric" name="date" id="add-date" placeholder="YYYY-MM-DD" pattern="\d{4}-\d{2}-\d{2}" title="YYYY-MM-DD" style="width:100px;" required>
+      <input type="text" inputmode="numeric" name="time" id="add-time" placeholder="HH:MM:SS" pattern="\d{2}:\d{2}(:\d{2})?" title="HH:MM:SS" style="width:84px;" required>
+      <input type="number" step="0.01" min="0.01" name="amount" id="add-amount" placeholder="Amount" style="width:110px;" required>
+      <input type="text" name="note" id="add-note" placeholder="Note" list="note-suggestions">
+      <input type="text" name="description" id="add-desc" placeholder="Description" list="desc-suggestions">
+      <button type="submit" class="btn-primary">Add</button>
+      <button type="button" class="btn-secondary" onclick="toggleAddForm()">Cancel</button>
+    </form>
+  </div>
+<table>
+  <thead>
+    <tr>
+      <th><input type="checkbox" id="select-all" title="Select all rows on this page"></th>
+      <th class="nowrap" data-col="date" title="INOUTCOME.WDATE">Date</th>
+      <th class="nowrap" data-col="time" title="INOUTCOME.ZDATE (epoch ms, local time)">Time</th>
+      <th data-col="account" title="INOUTCOME.assetUid &rarr; ASSETS.uid">Account</th>
+      <th data-col="category" title="INOUTCOME.ctgUid &rarr; ZCATEGORY (root, STATUS=0)">Category</th>
+      <th data-col="subcategory" title="INOUTCOME.ctgUid &rarr; ZCATEGORY (child, STATUS=2)">Subcategory</th>
+      <th class="note-col" data-col="note" title="INOUTCOME.ZCONTENT">Note</th>
+      <th class="note-col" data-col="description" title="INOUTCOME.ZDATA">Description</th>
+      <th class="amount" data-col="amount" title="INOUTCOME.AMOUNT_ACCOUNT, in the row's own account currency">Amount</th>
+      <th class="amount" data-col="entered" data-default-hidden="1" title="INOUTCOME.IN_ZMONEY: the amount as originally entered, in the transaction's own currency (currencyUid) &mdash; before conversion to AMOUNT_ACCOUNT">Entered Amount</th>
+      <th data-col="uid" data-default-hidden="1" title="INOUTCOME.uid, the real primary key">UID</th>
+      <th class="nowrap" data-col="updated" data-default-hidden="1" title="INOUTCOME.UTIME: last-write timestamp, epoch ms">Updated</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr data-uid="{{ r.uid }}" data-account="{{ r.account_uid }}" data-zdate="{{ r.zdate_ms }}" data-wdate="{{ r.WDATE }}"
+        data-label="{{ r.WDATE }} {{ r.tx_time }} &middot; {{ r.ZCONTENT or r.category_path or (r.account_name ~ ' transaction') }}"
+        title="INOUTCOME.uid={{ r.uid }} | DO_TYPE={{ r.DO_TYPE }}{{ ' | IS_DEL=' ~ r.is_del if r.is_del and r.is_del != 0 }}"
+        {{ 'style="opacity:.55"' if r.is_del and r.is_del != 0 }}>
+      <td><input type="checkbox" class="row-select" data-uid="{{ r.uid }}"></td>
+      <td class="nowrap" data-col="date" title="WDATE (text date) = {{ r.WDATE }}">
+        <span class="js-date-display" tabindex="0"></span>
+        <input type="text" inputmode="numeric" class="date-input" value="{{ r.WDATE }}" pattern="\d{4}-\d{2}-\d{2}" placeholder="YYYY-MM-DD" onchange="patchDateTime(this)" style="display:none">
+      </td>
+      <td class="nowrap" data-col="time" title="ZDATE (epoch ms, local time) = {{ r.zdate_ms }}">
+        <span class="js-time-display" tabindex="0"></span>
+        <input type="text" inputmode="numeric" class="time-input" value="{{ r.tx_time }}" pattern="\d{2}:\d{2}(:\d{2})?" placeholder="HH:MM:SS" onchange="patchDateTime(this)" style="display:none">
+        <span class="group-diff" style="font-size:11px;"></span>
+      </td>
+      <td data-col="account" title="assetUid = {{ r.account_uid }}">
+        {% if r.DO_TYPE == '3' %}
+          <span class="muted">{{ r.account_name }} &rarr; {{ r.to_account_name }}</span>
+        {% else %}
+          <select onchange="patchField('/api/transactions/{{ r.uid }}', 'assetUid', this.value, this)">
+            {% for a in accounts %}
+            <option value="{{ a.uid }}" {{ 'selected' if a.uid == r.account_uid }}>{{ a.NIC_NAME }}</option>
+            {% endfor %}
+          </select>
+        {% endif %}
+      </td>
+      {% if r.editable_category %}
+      <td data-col="category" title="ctgUid={{ r.category_uid }} | tree={{ 'income' if r.tree_type == 0 else 'expense' }}">
+        <select class="root-select" data-type="{{ r.tree_type }}"
+                onchange="onRootChange(this)">
+          {% for root in category_trees[r.tree_type] %}
+          <option value="{{ root.uid }}" {{ 'selected' if root.uid == r.root_uid }}>{{ root.name }}</option>
+          {% endfor %}
+        </select>
+      </td>
+      <td data-col="subcategory" title="ctgUid={{ r.category_uid }}">
+        <select class="sub-select" data-current="{{ r.category_uid }}"
+                onchange="patchField('/api/transactions/{{ r.uid }}', 'ctgUid', this.value, this)">
+        </select>
+      </td>
+      {% else %}
+      <td data-col="category" title="DO_TYPE={{ r.DO_TYPE }} (not category-editable: transfers/adjustments/mirror legs carry no ctgUid)">
+        <span class="badge">
+          {{ 'Transfer' if r.DO_TYPE == '3' else ('Transfer (mirror leg)' if r.DO_TYPE == '4' else 'Adjustment') }}
+        </span>
+      </td>
+      <td data-col="subcategory"></td>
+      {% endif %}
+      <td data-col="note" title="ZCONTENT">
+        <input type="text" value="{{ r.ZCONTENT or '' }}" list="note-suggestions"
+               onchange="patchField('/api/transactions/{{ r.uid }}', 'ZCONTENT', this.value, this)">
+      </td>
+      <td data-col="description" title="ZDATA">
+        <span class="desc-display" tabindex="0"></span>
+        <input type="text" class="desc-input" value="{{ r.ZDATA or '' }}" style="display:none" list="desc-suggestions"
+               onchange="patchField('/api/transactions/{{ r.uid }}', 'ZDATA', this.value, this); stopEditDesc(this)">
+      </td>
+      <td class="amount" data-col="amount" title="AMOUNT_ACCOUNT (raw)={{ r.AMOUNT_ACCOUNT }}, in the account's own currency (assetUid &rarr; ASSETS.currencyUid)">
+        <input type="text" inputmode="decimal" value="{{ r.AMOUNT_ACCOUNT | amt }}" data-orig="{{ r.AMOUNT_ACCOUNT }}"
+               class="amount-input {{ 'income' if r.DO_TYPE in ('0','7') else ('expense' if r.DO_TYPE in ('1','8') else '') }}"
+               onchange="patchAmount('/api/transactions/{{ r.uid }}', this)">
+        {{ r.account_currency_iso }}
+      </td>
+      <td class="amount" data-col="entered" title="IN_ZMONEY (raw)={{ r.entered_amount }}">
+        {% if r.entered_amount not in (None, '') %}<span class="js-amt" data-raw="{{ r.entered_amount }}">{{ r.entered_amount | amt }}</span> {{ r.currency_iso }}{% endif %}
+      </td>
+      <td data-col="uid" title="{{ r.uid }}">
+        <span class="muted" style="font-size:11px;">{{ r.uid }}</span>
+      </td>
+      <td class="nowrap" data-col="updated" title="UTIME (local)">
+        <span class="muted">{{ r.updated_str or '' }}</span>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<div class="filters" style="justify-content: space-between; margin-top: 12px;">
+  <div>
+    <label class="muted" for="page-size-select">Rows per page</label>
+    <select id="page-size-select" onchange="changePageSize(this.value)">
+      {% for opt in page_size_options %}
+      <option value="{{ opt }}" {{ 'selected' if opt == page_size }}>{{ opt }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="muted"><span class="js-num" data-raw="{{ total_rows }}">{{ total_rows | num }}</span> matching transactions</div>
+  <div>
+    <button type="button" class="btn-secondary" onclick="gotoPage(1)" {{ 'disabled' if page == 1 }}>&laquo; First</button>
+    <button type="button" class="btn-secondary" onclick="gotoPage({{ page - 1 }})" {{ 'disabled' if page == 1 }}>&lsaquo; Prev</button>
+    <span class="muted">Page</span>
+    <input type="number" id="page-input" min="1" max="{{ total_pages }}" value="{{ page }}"
+           style="width:64px; display:inline-block;"
+           onkeydown="if (event.key === 'Enter') gotoPage(this.value)">
+    <span class="muted">of {{ total_pages }}</span>
+    <button type="button" class="btn-secondary" onclick="gotoPage({{ page + 1 }})" {{ 'disabled' if page == total_pages }}>Next &rsaquo;</button>
+    <button type="button" class="btn-secondary" onclick="gotoPage({{ total_pages }})" {{ 'disabled' if page == total_pages }}>Last &raquo;</button>
+  </div>
+</div>
+
+<script>
+function gotoPage(page) {
+  const n = parseInt(page, 10);
+  if (!n || n < 1) return;
+  const params = new URLSearchParams(window.location.search);
+  params.set('page', n);
+  window.location.search = params.toString();
+}
+function changePageSize(size) {
+  const params = new URLSearchParams(window.location.search);
+  params.set('page_size', size);
+  params.set('page', 1);
+  window.location.search = params.toString();
+}
+
+function patchAmount(url, el) {
+  const numeric = el.value.replace(/,/g, '').trim();
+  const row = el.closest('tr');
+  stageChange({
+    url, field: 'AMOUNT_ACCOUNT', value: numeric, el,
+    label: row ? row.dataset.label : '', oldValue: el.dataset.orig,
+  });
+  const n = parseFloat(numeric);
+  if (!isNaN(n)) el.value = n.toLocaleString(LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// Native <input type=date>/<input type=time> render their displayed text in
+// the browser/OS locale, ignoring the `lang` attribute in Chromium -- so they
+// can't be made to honor the app's own locale setting. Instead each cell
+// shows a locale-formatted read-only span, and swaps in the native input
+// (which still holds/produces the real ISO value) only while being edited.
+function formatDateDisplay(raw) {
+  if (!raw) return '';
+  const d = new Date(raw + 'T00:00:00');
+  if (isNaN(d)) return raw;
+  return new Intl.DateTimeFormat(LOCALE, { year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+}
+function formatTimeDisplay(raw) {
+  if (!raw) return '';
+  const d = new Date('1970-01-01T' + raw);
+  if (isNaN(d)) return raw;
+  return new Intl.DateTimeFormat(LOCALE, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(d);
+}
+// Works for any span+input pair, whether it's a row cell (uses row-scoped
+// .date-input/.time-input classes) or a standalone one like the filter bar's
+// from/to pickers (uses the span's own nextElementSibling input).
+function refreshDateTimeSpan(span) {
+  const input = span.nextElementSibling;
+  if (!input) return;
+  const text = input.type === 'date' ? formatDateDisplay(input.value) : formatTimeDisplay(input.value);
+  span.textContent = text || span.dataset.emptyLabel || '';
+}
+function refreshDateTimeDisplay(row) {
+  const dateSpan = row.querySelector('.js-date-display');
+  const timeSpan = row.querySelector('.js-time-display');
+  if (dateSpan) refreshDateTimeSpan(dateSpan);
+  if (timeSpan) refreshDateTimeSpan(timeSpan);
+}
+function editDateTime(span) {
+  const input = span.nextElementSibling;
+  span.style.display = 'none';
+  input.style.display = '';
+  input.focus();
+}
+function stopEditDateTime(input) {
+  input.style.display = 'none';
+  const span = input.previousElementSibling;
+  span.style.display = '';
+  refreshDateTimeSpan(span);
+}
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.js-date-display, .js-time-display').forEach(span => {
+    refreshDateTimeSpan(span);
+    span.addEventListener('click', () => editDateTime(span));
+    span.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); editDateTime(span); } });
+  });
+  document.querySelectorAll('.js-date-display, .js-time-display').forEach(span => {
+    const input = span.nextElementSibling;
+    if (!input) return;
+    input.addEventListener('blur', () => stopEditDateTime(input));
+    input.addEventListener('change', () => stopEditDateTime(input));
+  });
+});
+
+// Description cells: shown as wrapped, read-only text (broken onto a new
+// line after each "; ") until clicked, which swaps in the real <input> for
+// editing -- same click-to-edit pattern as the date/time cells above.
+function renderDescDisplay(span, value) {
+  span.innerHTML = value ? escapeHtml(value).split('; ').join(';<br>') : '';
+}
+function editDesc(span) {
+  const input = span.nextElementSibling;
+  span.style.display = 'none';
+  input.style.display = '';
+  input.focus();
+}
+function stopEditDesc(input) {
+  input.style.display = 'none';
+  const span = input.previousElementSibling;
+  span.style.display = '';
+  renderDescDisplay(span, input.value);
+}
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.desc-display').forEach(span => {
+    const input = span.nextElementSibling;
+    if (input) renderDescDisplay(span, input.value);
+    span.addEventListener('click', () => editDesc(span));
+    span.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); editDesc(span); } });
+  });
+  document.querySelectorAll('.desc-input').forEach(input => {
+    input.addEventListener('blur', () => stopEditDesc(input));
+  });
+});
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_RE = /^\d{2}:\d{2}(:\d{2})?$/;
+
+// Plain-digit, segment-aware entry for date/time fields: typing "20260913"
+// auto-inserts the dashes as you go ("2026-09-13") and auto-advances into
+// the next segment once one fills up, same for "205510" -> "20:55:10" -- no
+// native calendar/clock picker, no locale-dependent format. Clicking (or
+// tabbing) into the field selects the whole segment under the cursor
+// (year/month/day, hour/minute/second) so typing a digit overwrites it
+// instead of inserting into the middle of it.
+function digitsOnly(s) { return s.replace(/\D/g, ''); }
+
+function attachSegmentedMask(el, groups, sep, bounds) {
+  if (!el) return;
+  // bounds[i] is [min, max] for segment i, or null/undefined for a segment
+  // with no range (the year). Enforced live -- typing "13" into a month
+  // segment, or "88" into an hour segment, clamps to the nearest valid
+  // value instead of silently accepting garbage that only gets caught (and
+  // wholesale discarded) by the regex check on blur/submit.
+  function clampSeg(segIdx, valueStr) {
+    const b = bounds && bounds[segIdx];
+    if (!b) return valueStr;
+    const [minV, maxV] = b;
+    const n = Math.max(minV, Math.min(maxV, parseInt(valueStr, 10) || 0));
+    return String(n).padStart(groups[segIdx], '0');
+  }
+  // Segments are re-derived from el.value on every interaction rather than
+  // cached on the element: caching them let any code that sets el.value
+  // directly (quick-range fills, reopening the add form, a validation
+  // revert) silently desync the mask's idea of the digits from what was
+  // actually displayed, corrupting the next keystroke.
+  function currentSegs() {
+    return groups.map((g, i) => ((el.value || '').split(sep)[i] || '').slice(0, g));
+  }
+
+  function layout(segs) {
+    let lastNonEmpty = -1;
+    segs.forEach((p, i) => { if (p !== '') lastNonEmpty = i; });
+    const visible = segs.slice(0, lastNonEmpty + 1);
+    const ranges = [];
+    let idx = 0;
+    visible.forEach((p, i) => {
+      ranges.push([idx, idx + p.length]);
+      idx += p.length + (i < visible.length - 1 ? sep.length : 0);
+    });
+    while (ranges.length < segs.length) ranges.push([idx, idx]);
+    return { value: visible.join(sep), ranges };
+  }
+  function render(segs) {
+    const { value, ranges } = layout(segs);
+    el.value = value;
+    return ranges;
+  }
+  function segAt(ranges, pos) {
+    for (let i = 0; i < ranges.length; i++) if (pos <= ranges[i][1]) return i;
+    return ranges.length - 1;
+  }
+  function selectSeg(ranges, i) {
+    const idx = Math.max(0, Math.min(i, ranges.length - 1));
+    el._activeSeg = idx;
+    const r = ranges[idx];
+    el.setSelectionRange(r[0], r[1]);
+  }
+
+  function selectCurrentSegment() {
+    const ranges = layout(currentSegs()).ranges;
+    selectSeg(ranges, segAt(ranges, el.selectionStart));
+  }
+  el.addEventListener('mouseup', selectCurrentSegment);
+  el.addEventListener('focus', () => {
+    el._focusValue = el.value;
+    setTimeout(selectCurrentSegment, 0);
+  });
+  // Every edit above sets el.value via script (render()), which clears the
+  // browser's native "dirty value" flag -- so the native `change` event
+  // (which onchange="patchDateTime(this)" etc. depend on to ever run) stops
+  // firing on blur. Restore that behavior explicitly by comparing against
+  // the value captured at focus time.
+  el.addEventListener('blur', () => {
+    if (el.value !== el._focusValue) el.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+
+  // Which segment a bare caret belongs to can't always be recovered from its
+  // position alone: once a segment is filled and the next one is still
+  // empty, both segments' ranges meet at the same offset, so a
+  // position-only lookup (segAt) always resolves the tie to the earlier
+  // (already-full) segment -- which is what made typing get stuck on the
+  // first unit after clearing the field and starting over. El._activeSeg
+  // tracks which segment we actually just moved into (set by selectSeg,
+  // e.g. right after auto-advancing) so that case is resolved correctly;
+  // segAt is still used to seed it on click/focus/paste, and as a fallback
+  // once the field is fully cleared or the caret has moved somewhere the
+  // tracked segment's range no longer covers.
+  function resolveActiveSeg(ranges, selStart, segs) {
+    if (segs.every(s => s === '')) return 0;
+    const tracked = el._activeSeg;
+    if (typeof tracked === 'number' && tracked >= 0 && tracked < ranges.length &&
+        selStart >= ranges[tracked][0] && selStart <= ranges[tracked][1]) {
+      return tracked;
+    }
+    return segAt(ranges, selStart);
+  }
+
+  el.addEventListener('beforeinput', (e) => {
+    const segs = currentSegs();
+    if (e.data && e.data.length === 1 && /[0-9]/.test(e.data)) {
+      const ranges = layout(segs).ranges;
+      const selStart = el.selectionStart, selEnd = el.selectionEnd;
+      const segIdx = resolveActiveSeg(ranges, selStart, segs);
+      const [segStart, segEnd] = ranges[segIdx];
+      if (selStart < segStart || selEnd > segEnd) return; // spans segments: let it fall through to the input fallback below
+      e.preventDefault();
+      const segLen = groups[segIdx];
+      const current = segs[segIdx];
+      let next = (current.slice(0, selStart - segStart) + e.data + current.slice(selEnd - segStart)).slice(0, segLen);
+      // Once what's typed so far can no longer stay within range even with
+      // trailing zeros (e.g. "9" for a month, or "6" for a minute -- 90+/
+      // 60+ never fit), stop waiting for a second digit: clamp and advance
+      // now, same as a native picker would.
+      const b = bounds && bounds[segIdx];
+      const forceAdvance = next.length < segLen && b && parseInt(next.padEnd(segLen, '0'), 10) > b[1];
+      if (next.length >= segLen || forceAdvance) next = clampSeg(segIdx, next);
+      segs[segIdx] = next;
+      const newRanges = render(segs);
+      if ((next.length >= segLen || forceAdvance) && segIdx + 1 < groups.length) {
+        selectSeg(newRanges, segIdx + 1);
+      } else {
+        el._activeSeg = segIdx;
+        const caret = newRanges[segIdx][0] + next.length;
+        el.setSelectionRange(caret, caret);
+      }
+      return;
+    }
+    if (e.inputType === 'insertFromPaste' || (e.data && e.data.length > 1)) {
+      e.preventDefault();
+      const max = groups.reduce((a, b) => a + b, 0);
+      const digits = digitsOnly(e.data || '').slice(0, max);
+      let idx = 0;
+      const pastedSegs = groups.map((g, i) => {
+        const p = digits.slice(idx, idx + g);
+        idx += g;
+        return p.length === g ? clampSeg(i, p) : p;
+      });
+      const newRanges = render(pastedSegs);
+      el.setSelectionRange(el.value.length, el.value.length);
+      el._activeSeg = segAt(newRanges, el.value.length);
+    }
+    // Deletions and anything else fall through to the native edit, cleaned
+    // up by the 'input' fallback below.
+  });
+
+  el.addEventListener('input', () => {
+    const ranges = render(currentSegs());
+    el._activeSeg = segAt(ranges, el.selectionStart);
+  });
+  el._activeSeg = 0;
+}
+function isValidDateStr(s) {
+  if (!DATE_RE.test(s)) return false;
+  const [y, mo, d] = s.split('-').map(Number);
+  if (mo < 1 || mo > 12 || d < 1) return false;
+  return d <= new Date(y, mo, 0).getDate();
+}
+function isValidTimeStr(s) {
+  if (!TIME_RE.test(s)) return false;
+  const [h, mi, se] = s.split(':').map(Number);
+  return h <= 23 && mi <= 59 && (se === undefined || se <= 59);
+}
+const DATE_SEG_BOUNDS = [null, [1, 12], [1, 31]];
+const TIME_SEG_BOUNDS = [[0, 23], [0, 59], [0, 59]];
+document.querySelectorAll('.date-input').forEach(el => attachSegmentedMask(el, [4, 2, 2], '-', DATE_SEG_BOUNDS));
+document.querySelectorAll('.time-input').forEach(el => attachSegmentedMask(el, [2, 2, 2], ':', TIME_SEG_BOUNDS));
+attachSegmentedMask(document.getElementById('date-from'), [4, 2, 2], '-', DATE_SEG_BOUNDS);
+attachSegmentedMask(document.getElementById('date-to'), [4, 2, 2], '-', DATE_SEG_BOUNDS);
+attachSegmentedMask(document.getElementById('add-date'), [4, 2, 2], '-', DATE_SEG_BOUNDS);
+attachSegmentedMask(document.getElementById('add-time'), [2, 2, 2], ':', TIME_SEG_BOUNDS);
+
+function patchDateTime(el) {
+  const row = el.closest('tr');
+  const uid = row.dataset.uid;
+  const dateEl = row.querySelector('.date-input');
+  const timeEl = row.querySelector('.time-input');
+  if (!isValidDateStr(dateEl.value) || !isValidTimeStr(timeEl.value)) {
+    alert('Enter the date as YYYY-MM-DD and the time as HH:MM:SS (or just the digits, e.g. 20260913 and 205510).');
+    el.value = el.dataset.orig !== undefined ? el.dataset.orig : el.defaultValue;
+    return;
+  }
+  const date = dateEl.value;
+  const time = timeEl.value.length === 5 ? timeEl.value + ':00' : timeEl.value;
+  const origDate = dateEl.dataset.orig !== undefined ? dateEl.dataset.orig : dateEl.defaultValue;
+  const origTime = timeEl.dataset.orig !== undefined ? timeEl.dataset.orig : timeEl.defaultValue;
+  const url = `/api/transactions/${uid}/datetime`;
+  const value = `${date} ${time}`;
+  const oldValue = `${origDate} ${origTime}`;
+  stageChange({
+    url, field: 'datetime', value, el: null,
+    label: row.dataset.label || '', oldValue, payload: { date, time },
+  });
+  const pending = String(value) !== String(oldValue);
+  dateEl.classList.toggle('cell-pending', pending);
+  timeEl.classList.toggle('cell-pending', pending);
+  row.querySelector('.js-date-display').classList.toggle('cell-pending', pending);
+  row.querySelector('.js-time-display').classList.toggle('cell-pending', pending);
+  refreshDateTimeDisplay(row);
+}
+
+// Bulk edit: page-only row selection, applied via one immediate write per
+// field (same no-batching/no-undo semantics as single-cell edits).
+const accountsData = JSON.parse(document.getElementById('accounts-data').textContent);
+const selectedUids = new Set();
+const TOTAL_MATCHING_ROWS = {{ total_rows }};
+let selectAllMode = false; // true once "select all matching rows" (every page) is active
+
+function updateBulkBar() {
+  const bar = document.getElementById('bulk-bar');
+  document.getElementById('bulk-count').textContent = selectedUids.size;
+  document.getElementById('bulk-scope-label').textContent = selectAllMode
+    ? `selected across all ${TOTAL_MATCHING_ROWS} matching rows`
+    : 'selected on this page';
+  bar.style.display = selectedUids.size > 0 ? 'flex' : 'none';
+  const matchBtn = document.getElementById('select-all-matching-btn');
+  const pageRowCount = document.querySelectorAll('.row-select').length;
+  if (!selectAllMode && selectedUids.size > 0 && selectedUids.size >= pageRowCount && TOTAL_MATCHING_ROWS > pageRowCount) {
+    matchBtn.style.display = '';
+    matchBtn.textContent = `Select all ${TOTAL_MATCHING_ROWS} matching rows instead`;
+  } else {
+    matchBtn.style.display = 'none';
+  }
+  if (selectedUids.size > 0 && !selectAllMode) prefillBulkValue(document.getElementById('bulk-field').value);
+}
+
+async function selectAllMatching() {
+  if (!confirm(`Select all ${TOTAL_MATCHING_ROWS} rows matching the current filters, across every page? You'll get an extra warning before any change is actually staged.`)) return;
+  const resp = await fetch('/api/transactions/uids' + window.location.search);
+  const data = await resp.json();
+  selectedUids.clear();
+  (data.uids || []).forEach(uid => selectedUids.add(uid));
+  selectAllMode = true;
+  updateBulkBar();
+}
+
+function firstSelectedRow() {
+  const uid = selectedUids.values().next().value;
+  if (!uid) return null;
+  return document.querySelector(`tr[data-uid="${CSS.escape(uid)}"]`);
+}
+
+function prefillBulkValue(field) {
+  const row = firstSelectedRow();
+  if (!row) return;
+  if (field === 'assetUid') {
+    const src = row.querySelector('td[data-col="account"] select');
+    const dst = document.getElementById('bulk-value-select');
+    if (src && dst) dst.value = src.value;
+  } else if (field === 'ctgUid') {
+    const rootSrc = row.querySelector('.root-select');
+    const subSrc = row.querySelector('.sub-select');
+    const root = document.getElementById('bulk-cat-root');
+    const sub = document.getElementById('bulk-cat-sub');
+    if (rootSrc && subSrc && root && sub) {
+      root.value = rootSrc.value;
+      populateSubSelect(sub, rootSrc.dataset.type, rootSrc.value, subSrc.value);
+    }
+  } else {
+    const selector = field === 'ZCONTENT' ? 'td[data-col="note"] input' : 'td[data-col="description"] input';
+    const src = row.querySelector(selector);
+    const dst = document.getElementById('bulk-value-text');
+    if (src && dst) dst.value = src.value;
+  }
+}
+
+document.querySelectorAll('.row-select').forEach(cb => {
+  cb.addEventListener('change', () => {
+    if (cb.checked) selectedUids.add(cb.dataset.uid); else selectedUids.delete(cb.dataset.uid);
+    updateBulkBar();
+  });
+});
+
+document.getElementById('select-all').addEventListener('change', (e) => {
+  document.querySelectorAll('.row-select').forEach(cb => {
+    cb.checked = e.target.checked;
+    if (cb.checked) selectedUids.add(cb.dataset.uid); else selectedUids.delete(cb.dataset.uid);
+  });
+  updateBulkBar();
+});
+
+function clearSelection() {
+  selectedUids.clear();
+  selectAllMode = false;
+  document.querySelectorAll('.row-select').forEach(cb => cb.checked = false);
+  document.getElementById('select-all').checked = false;
+  updateBulkBar();
+}
+
+function onBulkFieldChange() {
+  const field = document.getElementById('bulk-field').value;
+  const widgets = document.getElementById('bulk-value-widgets');
+  if (field === 'assetUid') {
+    let html = '<select id="bulk-value-select">';
+    for (const a of accountsData) html += `<option value="${a.uid}">${a.NIC_NAME}</option>`;
+    html += '</select>';
+    widgets.innerHTML = html;
+  } else if (field === 'ctgUid') {
+    widgets.innerHTML = '<select id="bulk-cat-root"></select> <select id="bulk-cat-sub"></select>';
+    const root = document.getElementById('bulk-cat-root');
+    let html = '<optgroup label="Income">';
+    for (const r of categoryTrees[0]) html += `<option value="${r.uid}" data-type="0">${r.name}</option>`;
+    html += '</optgroup><optgroup label="Expense">';
+    for (const r of categoryTrees[1]) html += `<option value="${r.uid}" data-type="1">${r.name}</option>`;
+    html += '</optgroup>';
+    root.innerHTML = html;
+    function refreshBulkSub() {
+      const type = root.selectedOptions[0].dataset.type;
+      populateSubSelect(document.getElementById('bulk-cat-sub'), type, root.value, null);
+    }
+    root.addEventListener('change', refreshBulkSub);
+    refreshBulkSub();
+  } else {
+    widgets.innerHTML = '<input type="text" id="bulk-value-text" placeholder="New value">';
+  }
+  prefillBulkValue(field);
+}
+
+function getBulkValue(field) {
+  if (field === 'assetUid') {
+    const el = document.getElementById('bulk-value-select');
+    return el ? el.value : null;
+  }
+  if (field === 'ctgUid') {
+    const el = document.getElementById('bulk-cat-sub');
+    return el ? el.value : null;
+  }
+  const el = document.getElementById('bulk-value-text');
+  return el ? el.value : null;
+}
+
+function findCategoryInfo(uid) {
+  for (const type of [0, 1]) {
+    for (const root of categoryTrees[type] || []) {
+      if (root.uid === uid) return { type, rootUid: root.uid };
+      for (const c of root.children) if (c.uid === uid) return { type, rootUid: root.uid };
+    }
+  }
+  return null;
+}
+
+function applyBulkEdit() {
+  const uids = Array.from(selectedUids);
+  if (uids.length === 0) return;
+  const fieldSelect = document.getElementById('bulk-field');
+  const field = fieldSelect.value;
+  const fieldLabel = fieldSelect.selectedOptions[0].textContent;
+  const value = getBulkValue(field);
+  if (value === null) { alert('Pick a value first.'); return; }
+  const shown = value === '' ? '(empty)' : value;
+
+  if (selectAllMode) {
+    // No row DOM to read/validate against here (most of these rows aren't
+    // on this page), so this path stages the raw field/value directly --
+    // an explicit, harder-to-misfire warning stands in for the per-row
+    // "wrong income/expense tree" guard the this-page path has below.
+    if (!confirm(
+      `WARNING: this stages "${fieldLabel}" = "${shown}" on ALL ${uids.length} rows matching your current filters -- ` +
+      `across every page, not just what's shown here. Nothing is written until you review and click Save. Continue?`
+    )) return;
+    uids.forEach(uid => {
+      stageChange({
+        url: `/api/transactions/${uid}`, field, value, el: null,
+        label: uid, oldValue: undefined, payload: { field, value },
+      });
+    });
+    clearSelection();
+    return;
+  }
+
+  if (!confirm(`Stage "${fieldLabel}" = "${shown}" on ${uids.length} transaction(s)? Nothing is written until you review and click Save.`)) return;
+  let skipped = 0;
+  uids.forEach(uid => {
+    const row = document.querySelector(`tr[data-uid="${CSS.escape(uid)}"]`);
+    if (!row) return;
+    const url = `/api/transactions/${uid}`;
+    if (field === 'ctgUid') {
+      const info = findCategoryInfo(value);
+      const rootSel = row.querySelector('.root-select');
+      const subSel = row.querySelector('.sub-select');
+      if (!info || !rootSel || !subSel || String(rootSel.dataset.type) !== String(info.type)) { skipped++; return; }
+      rootSel.value = info.rootUid;
+      populateSubSelect(subSel, info.type, info.rootUid, value);
+      patchField(url, field, value, subSel);
+      return;
+    }
+    let el = null;
+    if (field === 'assetUid') el = row.querySelector('td[data-col="account"] select');
+    else if (field === 'ZCONTENT') el = row.querySelector('td[data-col="note"] input');
+    else if (field === 'ZDATA') el = row.querySelector('td[data-col="description"] input');
+    if (!el) { skipped++; return; }
+    el.value = value;
+    patchField(url, field, value, el);
+  });
+  clearSelection();
+  if (skipped > 0) alert(`${skipped} row(s) were skipped (not editable for this field, e.g. transfers/adjustments, or a category from the wrong income/expense tree).`);
+}
+
+onBulkFieldChange();
+
+// Column visibility: every header cell gets its own small "▾" trigger
+// (inline with that column, as opposed to one button living somewhere else
+// entirely), all of them opening the same shared panel -- which lists every
+// column, not just the one you clicked, so a hidden column always stays
+// reachable no matter which header's trigger you use. "Auto-fit columns"
+// (forgetting saved/manual widths) lives in that same panel rather than as
+// a separate button elsewhere.
+(function initColumnToggles() {
+  const table = document.querySelector('.table-scroll table');
+  const storageKey = 'mmw_cols_transactions';
+  const ths = Array.from(table.querySelectorAll('thead th[data-col]'));
+  let hidden;
+  try { hidden = JSON.parse(localStorage.getItem(storageKey)); } catch (e) { hidden = null; }
+  if (!Array.isArray(hidden)) {
+    hidden = ths.filter(th => th.dataset.defaultHidden === '1').map(th => th.dataset.col);
+  }
+  function setVisible(col, visible) {
+    table.querySelectorAll(`[data-col="${col}"]`).forEach(el => {
+      el.style.display = visible ? '' : 'none';
+    });
+  }
+  ths.forEach(th => setVisible(th.dataset.col, !hidden.includes(th.dataset.col)));
+
+  const panel = document.createElement('div');
+  panel.className = 'check-dropdown-panel col-menu-panel';
+  panel.hidden = true;
+  ths.forEach(th => {
+    const col = th.dataset.col;
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !hidden.includes(col);
+    cb.addEventListener('change', () => {
+      setVisible(col, cb.checked);
+      hidden = cb.checked ? hidden.filter(c => c !== col) : Array.from(new Set([...hidden, col]));
+      localStorage.setItem(storageKey, JSON.stringify(hidden));
+    });
+    label.appendChild(cb);
+    label.append(' ' + th.textContent.trim());
+    panel.appendChild(label);
+  });
+  const divider = document.createElement('div');
+  divider.className = 'check-dropdown-group';
+  panel.appendChild(divider);
+  const autoFitBtn = document.createElement('button');
+  autoFitBtn.type = 'button';
+  autoFitBtn.className = 'btn-secondary';
+  autoFitBtn.style.cssText = 'width:100%; margin-top:4px;';
+  autoFitBtn.textContent = 'Auto-fit columns';
+  autoFitBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    table.resetColumnWidths();
+    panel.hidden = true;
+  });
+  panel.appendChild(autoFitBtn);
+  panel.addEventListener('click', (e) => e.stopPropagation());
+  document.body.appendChild(panel);
+
+  function openPanelNear(trigger) {
+    const wasHidden = panel.hidden;
+    panel.hidden = true;
+    if (!wasHidden) return; // clicking the same trigger again just closes it
+    const r = trigger.getBoundingClientRect();
+    panel.style.position = 'fixed';
+    panel.style.top = r.bottom + 4 + 'px';
+    panel.style.left = Math.min(r.left, window.innerWidth - 260) + 'px';
+    panel.hidden = false;
+  }
+  ths.forEach(th => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'col-menu-btn';
+    btn.title = 'Column options';
+    btn.textContent = '▾';
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openPanelNear(btn);
+    });
+    th.appendChild(btn);
+  });
+  document.addEventListener('click', () => { panel.hidden = true; });
+})();
+
+const categoryTrees = JSON.parse(document.getElementById('category-trees').textContent);
+
+function populateSubSelect(subSelect, treeType, rootUid, selectedUid) {
+  const tree = categoryTrees[treeType] || [];
+  const root = tree.find(r => r.uid === rootUid);
+  const children = root ? root.children : [];
+  let html = `<option value="${rootUid}">(root category itself)</option>`;
+  for (const c of children) {
+    const sel = c.uid === selectedUid ? 'selected' : '';
+    html += `<option value="${c.uid}" ${sel}>${c.name}</option>`;
+  }
+  subSelect.innerHTML = html;
+  if (children.some(c => c.uid === selectedUid)) {
+    subSelect.value = selectedUid;
+  } else {
+    subSelect.value = rootUid;
+  }
+}
+
+function onRootChange(rootSelect) {
+  const row = rootSelect.closest('tr');
+  const subSelect = row.querySelector('.sub-select');
+  const treeType = rootSelect.dataset.type;
+  populateSubSelect(subSelect, treeType, rootSelect.value, null);
+  const uid = row.dataset.uid;
+  patchField(`/api/transactions/${uid}`, 'ctgUid', subSelect.value, subSelect);
+}
+
+// -- Add transaction ---------------------------------------------------
+const addForm = document.getElementById('add-tx-form');
+const addToggleBtn = document.getElementById('add-tx-toggle');
+const addType = document.getElementById('add-type');
+const addRoot = document.getElementById('add-root');
+const addSub = document.getElementById('add-sub');
+const addCategoryWrap = document.getElementById('add-category-wrap');
+const addToAccountWrap = document.getElementById('add-to-account-wrap');
+const addToAccount = document.getElementById('add-to-account');
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+// The add-transaction form's field values (except amount) survive across
+// consecutive adds -- and across the page reload each add triggers -- via
+// sessionStorage, so entering several transactions in a row keeps the same
+// date/time/account/category/note instead of resetting to "now" and blank.
+const ADD_STATE_KEY = 'mmw_add_tx_state';
+function getAddFormState() {
+  try { return JSON.parse(sessionStorage.getItem(ADD_STATE_KEY)); } catch (e) { return null; }
+}
+function setAddFormState(s) { sessionStorage.setItem(ADD_STATE_KEY, JSON.stringify(s)); }
+function clearAddFormState() { sessionStorage.removeItem(ADD_STATE_KEY); }
+
+function captureAddFormState() {
+  return {
+    type: addType.value,
+    account: document.getElementById('add-account').value,
+    toAccount: addToAccount.value,
+    root: addRoot.value,
+    sub: addSub.value,
+    date: document.getElementById('add-date').value,
+    time: document.getElementById('add-time').value,
+    note: document.getElementById('add-note').value,
+    description: document.getElementById('add-desc').value,
+  };
+}
+function applyAddFormState(s) {
+  addType.value = s.type;
+  populateAddCategory();
+  document.getElementById('add-account').value = s.account;
+  addToAccount.value = s.toAccount || '';
+  if (s.root) {
+    addRoot.value = s.root;
+    populateSubSelect(addSub, addRoot.dataset.type, addRoot.value, s.sub);
+  }
+  document.getElementById('add-date').value = s.date;
+  document.getElementById('add-time').value = s.time;
+  document.getElementById('add-amount').value = '';
+  document.getElementById('add-note').value = s.note || '';
+  document.getElementById('add-desc').value = s.description || '';
+}
+
+function toggleAddForm() {
+  const show = addForm.style.display === 'none';
+  addForm.style.display = show ? '' : 'none';
+  addToggleBtn.textContent = show ? 'Cancel' : '+ Add transaction';
+  if (show) {
+    const saved = getAddFormState();
+    if (saved) {
+      applyAddFormState(saved);
+    } else {
+      const now = new Date();
+      document.getElementById('add-date').value = fmtDate(now);
+      document.getElementById('add-time').value = pad2(now.getHours()) + ':' + pad2(now.getMinutes()) + ':' + pad2(now.getSeconds());
+      document.getElementById('add-amount').value = '';
+      document.getElementById('add-note').value = '';
+      document.getElementById('add-desc').value = '';
+      populateAddCategory();
+    }
+  } else {
+    clearAddFormState();
+  }
+}
+
+function populateAddCategory() {
+  const type = addType.value;
+  const isAdj = type === '7' || type === '8';
+  const isTransfer = type === '3';
+  addToAccountWrap.style.display = isTransfer ? '' : 'none';
+  addToAccount.required = isTransfer;
+  addCategoryWrap.style.display = (isAdj || isTransfer) ? 'none' : '';
+  if (isAdj || isTransfer) return;
+  const treeType = type === '0' ? 0 : 1;
+  const tree = categoryTrees[treeType] || [];
+  addRoot.dataset.type = treeType;
+  addRoot.innerHTML = tree.map(r => `<option value="${r.uid}">${r.name}</option>`).join('');
+  populateSubSelect(addSub, treeType, addRoot.value, null);
+}
+addType.addEventListener('change', populateAddCategory);
+addRoot.addEventListener('change', () => populateSubSelect(addSub, addRoot.dataset.type, addRoot.value, null));
+
+async function submitAddTx(e) {
+  e.preventDefault();
+  const type = addType.value;
+  const isAdj = type === '7' || type === '8';
+  const isTransfer = type === '3';
+  const payload = {
+    type,
+    account: document.getElementById('add-account').value,
+    to_account: isTransfer ? addToAccount.value : '',
+    category: (isAdj || isTransfer) ? '' : addSub.value,
+    date: document.getElementById('add-date').value,
+    time: document.getElementById('add-time').value,
+    amount: document.getElementById('add-amount').value,
+    note: document.getElementById('add-note').value,
+    description: document.getElementById('add-desc').value,
+  };
+  if (!payload.account || !payload.date || !payload.amount) {
+    alert('Account, date and amount are required.');
+    return false;
+  }
+  if (isTransfer && (!payload.to_account || payload.to_account === payload.account)) {
+    alert('Pick two different accounts for a transfer.');
+    return false;
+  }
+  if (!isValidDateStr(payload.date) || !isValidTimeStr(payload.time)) {
+    alert('Enter the date as YYYY-MM-DD and the time as HH:MM:SS (or just the digits, e.g. 20260913 and 205510).');
+    return false;
+  }
+  const resp = await fetch('/api/transactions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await resp.json();
+  if (!data.ok) {
+    alert('Failed to add transaction: ' + (data.error || 'unknown error'));
+    return false;
+  }
+  setAddFormState(captureAddFormState());
+  location.reload();
+  return false;
+}
+
+// initial population of every row's subcategory select from the row data
+document.querySelectorAll('tbody tr').forEach(row => {
+  const rootSelect = row.querySelector('.root-select');
+  const subSelect = row.querySelector('.sub-select');
+  if (!rootSelect || !subSelect) return;
+  populateSubSelect(subSelect, rootSelect.dataset.type, rootSelect.value, subSelect.dataset.current);
+});
+
+// Compact checkbox-based multi-select filters (account/category/type): a
+// toggle button reveals a panel of checkboxes that all share the same input
+// `name`, so the surrounding GET form submits them as repeated query params
+// with no extra JS needed for the actual filtering.
+(function initCheckDropdowns() {
+  const dropdowns = Array.from(document.querySelectorAll('.check-dropdown'));
+  function refreshLabel(dd) {
+    const btn = dd.querySelector('.check-dropdown-toggle');
+    const checked = dd.querySelectorAll('input:checked');
+    btn.textContent = checked.length
+      ? `${dd.dataset.label[0].toUpperCase()}${dd.dataset.label.slice(1)}: ${checked.length} selected`
+      : dd.dataset.placeholder;
+  }
+  // Root categories with children cycle off -> "all" (root + subcategories,
+  // submitted as `category`) -> "only" (root alone, submitted as
+  // `category_only`) -> off.
+  function applyTriState(cb) {
+    const state = cb.dataset.state;
+    cb.checked = state !== 'off';
+    cb.indeterminate = state === 'only';
+    cb.name = state === 'only' ? 'category_only' : 'category';
+    const label = cb.closest('label');
+    label.classList.toggle('tri-state-is-only', state === 'only');
+    const count = label.querySelector('.tri-state-count');
+    count.textContent = state === 'only' ? count.dataset.only : count.dataset.all;
+  }
+  dropdowns.forEach(dd => {
+    const btn = dd.querySelector('.check-dropdown-toggle');
+    const panel = dd.querySelector('.check-dropdown-panel');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const wasHidden = panel.hidden;
+      dropdowns.forEach(other => { other.querySelector('.check-dropdown-panel').hidden = true; });
+      panel.hidden = !wasHidden;
+    });
+    panel.addEventListener('click', (e) => e.stopPropagation());
+    panel.querySelectorAll('input[type=checkbox]').forEach(cb => cb.addEventListener('change', () => refreshLabel(dd)));
+    panel.querySelectorAll('input.tri-state').forEach(cb => {
+      applyTriState(cb);
+      // The browser has already toggled `checked` by the time this runs;
+      // overriding it here (without preventDefault) sticks.
+      cb.addEventListener('click', () => {
+        cb.dataset.state = { off: 'all', all: 'only', only: 'off' }[cb.dataset.state] || 'all';
+        applyTriState(cb);
+      });
+    });
+    refreshLabel(dd);
+  });
+  document.addEventListener('click', () => {
+    dropdowns.forEach(dd => { dd.querySelector('.check-dropdown-panel').hidden = true; });
+  });
+})();
+
+// Quick date-range picker: fills From/To and submits the filter form.
+function fmtDate(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function startOfWeek(d) {
+  const r = new Date(d);
+  const day = (r.getDay() + 6) % 7; // Monday = 0
+  r.setDate(r.getDate() - day);
+  return r;
+}
+function setRangeAndSubmit(from, to) {
+  document.getElementById('date-from').value = from ? fmtDate(from) : '';
+  document.getElementById('date-to').value = to ? fmtDate(to) : '';
+  document.getElementById('filter-form').submit();
+}
+function applyQuickRange(value) {
+  if (!value) return;
+  const now = new Date();
+  let from, to;
+  switch (value) {
+    case 'today':
+      from = to = now;
+      break;
+    case 'this_week':
+      from = startOfWeek(now);
+      to = new Date(from); to.setDate(to.getDate() + 6);
+      break;
+    case 'last_week':
+      to = startOfWeek(now); to.setDate(to.getDate() - 1);
+      from = new Date(to); from.setDate(from.getDate() - 6);
+      break;
+    case 'this_month':
+      from = new Date(now.getFullYear(), now.getMonth(), 1);
+      to = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+      break;
+    case 'last_month':
+      from = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      to = new Date(now.getFullYear(), now.getMonth(), 0);
+      break;
+    case 'this_quarter': {
+      const q = Math.floor(now.getMonth() / 3);
+      from = new Date(now.getFullYear(), q * 3, 1);
+      to = new Date(now.getFullYear(), q * 3 + 3, 0);
+      break;
+    }
+    case 'last_quarter': {
+      const q = Math.floor(now.getMonth() / 3) - 1;
+      const y = now.getFullYear() + (q < 0 ? -1 : 0);
+      const qq = (q + 4) % 4;
+      from = new Date(y, qq * 3, 1);
+      to = new Date(y, qq * 3 + 3, 0);
+      break;
+    }
+    case 'this_year':
+      from = new Date(now.getFullYear(), 0, 1);
+      to = new Date(now.getFullYear(), 11, 31);
+      break;
+    case 'last_year':
+      from = new Date(now.getFullYear() - 1, 0, 1);
+      to = new Date(now.getFullYear() - 1, 11, 31);
+      break;
+    case 'last_7':
+      to = now; from = new Date(now); from.setDate(from.getDate() - 6);
+      break;
+    case 'last_30':
+      to = now; from = new Date(now); from.setDate(from.getDate() - 29);
+      break;
+    case 'last_90':
+      to = now; from = new Date(now); from.setDate(from.getDate() - 89);
+      break;
+    default:
+      return;
+  }
+  setRangeAndSubmit(from, to);
+}
+function applyYearPeriodRange() {
+  const year = parseInt(document.getElementById('quick-year').value, 10);
+  if (!year) return;
+  const period = document.getElementById('quick-period').value;
+  let from, to;
+  if (period === 'year') {
+    from = new Date(year, 0, 1);
+    to = new Date(year, 11, 31);
+  } else if (period[0] === 'q') {
+    const q = parseInt(period[1], 10) - 1;
+    from = new Date(year, q * 3, 1);
+    to = new Date(year, q * 3 + 3, 0);
+  } else {
+    const m = parseInt(period, 10) - 1;
+    from = new Date(year, m, 1);
+    to = new Date(year, m + 1, 0);
+  }
+  setRangeAndSubmit(from, to);
+}
+// The period select always has a value, so a year/period pick only needs a
+// year chosen to be ready -- no separate "Go" button required.
+function maybeApplyYearPeriod() {
+  if (document.getElementById('quick-year').value) applyYearPeriodRange();
+}
+
+// Group transactions from the same account that fall within N seconds of
+// each other (e.g. a split purchase entered as several rows at once).
+const groupToggle = document.getElementById('group-toggle');
+const groupSeconds = document.getElementById('group-seconds');
+
+function applyDayAccountBanding() {
+  const rows = Array.from(document.querySelectorAll('tbody tr'));
+  let groupIndex = 0;
+  let prevKey = null;
+  rows.forEach(row => {
+    const key = row.dataset.account + '|' + row.dataset.wdate;
+    if (key !== prevKey) groupIndex++;
+    row.classList.add(groupIndex % 2 === 0 ? 'group-a' : 'group-b');
+    prevKey = key;
+  });
+}
+
+// Visual clustering only ever covers whatever rows are actually loaded on
+// this page -- that's just a highlight, not the point of grouping. The
+// stats (group count, avg size, gaps) are what grouping is really for, and
+// those are fetched from the server over every matching transaction, not
+// just this page -- see updateGroupStats() below.
+function applyGrouping() {
+  const rows = Array.from(document.querySelectorAll('tbody tr'));
+  rows.forEach(r => {
+    r.classList.remove('group-a', 'group-b', 'group-start');
+    r.style.borderTop = '';
+    const diffSpan = r.querySelector('.group-diff');
+    if (diffSpan) diffSpan.textContent = '';
+  });
+  if (!groupToggle.checked) {
+    applyDayAccountBanding();
+    return;
+  }
+  const thresholdMs = Math.max(1, parseInt(groupSeconds.value, 10) || 60) * 1000;
+  let groupIndex = 0;
+  let prevAccount = null;
+  let prevTime = null;
+  let prevRow = null;
+  rows.forEach((row) => {
+    const account = row.dataset.account;
+    const t = parseInt(row.dataset.zdate, 10);
+    const sameCluster = prevAccount !== null && account === prevAccount && !isNaN(t) && !isNaN(prevTime)
+      && Math.abs(prevTime - t) <= thresholdMs;
+    if (!sameCluster) {
+      groupIndex++;
+      row.classList.add('group-start');
+      row.style.borderTop = '2px solid var(--accent)';
+    } else if (!isNaN(t) && !isNaN(prevTime)) {
+      const diffMsVal = Math.abs(t - prevTime);
+      if (diffMsVal !== 0) {
+        // Label the later of the two rows with how much later it is,
+        // regardless of which one is displayed first.
+        const laterRow = t > prevTime ? row : prevRow;
+        const diffSpan = laterRow.querySelector('.group-diff');
+        if (diffSpan) diffSpan.textContent = '+' + (diffMsVal / 1000).toFixed(1) + 's';
+      }
+    }
+    row.classList.add(groupIndex % 2 === 0 ? 'group-a' : 'group-b');
+    prevAccount = account;
+    prevTime = t;
+    prevRow = row;
+  });
+}
+
+let groupStatsRequestId = 0;
+async function updateGroupStats() {
+  const statsEl = document.getElementById('group-stats');
+  if (!groupToggle.checked) {
+    statsEl.textContent = '';
+    return;
+  }
+  const seconds = Math.max(1, parseInt(groupSeconds.value, 10) || 60);
+  statsEl.textContent = 'Computing group stats across all matching rows…';
+  const requestId = ++groupStatsRequestId;
+  const params = new URLSearchParams(window.location.search);
+  params.set('seconds', seconds);
+  let data;
+  try {
+    const resp = await fetch('/api/transactions/group-stats?' + params.toString());
+    data = await resp.json();
+  } catch (e) {
+    if (requestId === groupStatsRequestId) statsEl.textContent = 'Could not load group stats.';
+    return;
+  }
+  if (requestId !== groupStatsRequestId) return; // a newer request has since superseded this one
+  if (!data.groups) {
+    statsEl.textContent = '';
+    return;
+  }
+  statsEl.textContent = `${data.groups} groups (${data.multi_groups} with >1 row) over ${data.total_rows} matching rows · ` +
+    `avg ${data.avg_size.toFixed(2)} tx/group · gap within a group: avg ${data.avg_gap_sec.toFixed(1)}s, median ${data.median_gap_sec.toFixed(1)}s`;
+}
+
+groupToggle.addEventListener('change', () => {
+  localStorage.setItem('mmw_group_enabled', groupToggle.checked ? '1' : '0');
+  applyGrouping();
+  updateGroupStats();
+});
+groupSeconds.addEventListener('change', () => {
+  localStorage.setItem('mmw_group_seconds', groupSeconds.value);
+  applyGrouping();
+  updateGroupStats();
+});
+groupToggle.checked = localStorage.getItem('mmw_group_enabled') === '1';
+groupSeconds.value = localStorage.getItem('mmw_group_seconds') || '60';
+applyGrouping();
+updateGroupStats();
+
+// Reopen the add-transaction form with its previous values after the reload
+// that follows a successful add (see setAddFormState in submitAddTx).
+if (getAddFormState()) toggleAddForm();
+</script>
+{% endblock %}

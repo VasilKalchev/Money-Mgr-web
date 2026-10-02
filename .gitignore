@@ -1,0 +1,8 @@
+# Runtime state: database, backups, and config.json (holds Google credentials)
+data/
+*.mmbak
+__pycache__/
+
+# Personal scratch list
+docs/todo.md
+.venv/

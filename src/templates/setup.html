@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Set up database{% endblock %}
+{% block content %}
+<h2 style="margin-top:0;">Set up your database</h2>
+<p class="muted" style="font-size:14px; max-width:760px;">
+  Money Mgr web works on a Money Manager backup (<code>.mmbak</code>). How do you want to provide it?
+  It's stored in this app's data volume, so it survives container restarts.
+</p>
+<div class="choices" style="max-width:1080px;">
+  <div class="card">
+    <h2>Upload it manually</h2>
+    <p class="muted">Export a backup from the Money Manager app and upload the file here. You can upload a newer one any time from Settings.</p>
+    <form method="post" action="/db/upload" enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label for="db-file">.mmbak file</label>
+      <input type="file" name="db_file" id="db-file" accept=".mmbak,.sqlite,.db" required>
+      <div class="actions"><button type="submit" class="btn-primary">Upload</button></div>
+    </form>
+  </div>
+  <div class="card">
+    <h2>Sync with Google Drive</h2>
+    <p class="muted">Money Manager's cloud backups land in a Drive folder. Connect your own Google API project (read-only) and this app pulls the newest snapshot from it. Nothing is ever written to Drive.</p>
+    <div class="actions"><a class="btn-primary" href="/setup/gdrive" style="text-decoration:none;">Set up Google Drive</a></div>
+  </div>
+</div>
+{% endblock %}

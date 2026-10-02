@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}Categories{% endblock %}
+{% block content %}
+
+{% macro rows_cell(uid) %}
+{%- set entries = totals.get(uid, []) -%}
+{%- set n = entries | sum(attribute=2) -%}
+<span class="js-num" data-raw="{{ n }}">{{ n | num }}</span>
+{%- endmacro %}
+
+{% macro total_cell(uid) %}
+{%- set entries = totals.get(uid, []) -%}
+{%- if not entries -%}
+<span class="js-amt" data-raw="0">0.00</span>
+{%- else -%}
+{%- for iso, total, rows in entries -%}
+<div class="cur-total">{{ iso }} <span class="js-amt" data-raw="{{ total }}">{{ total | amt }}</span></div>
+{%- endfor -%}
+{%- endif -%}
+{%- endmacro %}
+
+<div class="filters" id="col-toggles"></div>
+<p class="muted">Drag a row to reorder it. Subcategories can only be reordered within their own category.</p>
+
+<h2>Income</h2>
+<div class="table-scroll">
+<table class="cat-table" id="income-table">
+  <thead>
+    <tr>
+      <th data-col="name" title="ZCATEGORY.NAME">Category</th>
+      <th class="amount" data-col="rows" title="COUNT(INOUTCOME) where ctgUid=uid and IS_DEL=0">Rows</th>
+      <th class="amount" data-col="total" title="SUM(AMOUNT_ACCOUNT) grouped by account currency, shown side by side">Total</th>
+      <th data-col="uid" data-default-hidden="1" title="ZCATEGORY.uid, the real primary key">UID</th>
+      <th class="amount" data-col="order" data-default-hidden="1" title="ZCATEGORY.ORDERSEQ: display order in the picker">Order</th>
+      <th data-col="deleted" data-default-hidden="1" title="ZCATEGORY.C_IS_DEL: tombstone flag. Tombstoned categories are excluded from this list entirely so this column is always blank here.">Deleted</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for root, kids in income_tree %}
+    <tr class="tree-root" draggable="true" data-uid="{{ root.uid }}" data-type="{{ root.TYPE }}"
+        data-group="root:{{ root.TYPE }}" data-label="{{ root.NAME }}"
+        data-orderseq-orig="{{ root.ORDERSEQ if root.ORDERSEQ is not none else 0 }}"
+        title="ZCATEGORY.uid={{ root.uid }} | STATUS=0 (root) | TYPE={{ root.TYPE }} &mdash; drag to reorder among root categories">
+      <td data-col="name" title="NAME">
+        <input type="text" value="{{ root.NAME }}"
+               onchange="patchField('/api/categories/{{ root.uid }}/{{ root.TYPE }}', 'NAME', this.value, this)">
+      </td>
+      <td class="amount" data-col="rows">{{ rows_cell(root.uid) }}</td>
+      <td class="amount" data-col="total">{{ total_cell(root.uid) }}</td>
+      <td data-col="uid"><span class="muted" style="font-size:11px;">{{ root.uid }}</span></td>
+      <td class="amount" data-col="order">{{ root.ORDERSEQ if root.ORDERSEQ is not none else '' }}</td>
+      <td data-col="deleted">{{ root.C_IS_DEL if root.C_IS_DEL not in (None, '') else '' }}</td>
+    </tr>
+    {% for k in kids %}
+    <tr class="tree-child" draggable="true" data-uid="{{ k.uid }}" data-type="{{ k.TYPE }}"
+        data-group="child:{{ root.uid }}" data-label="{{ root.NAME }} &gt; {{ k.NAME }}"
+        data-orderseq-orig="{{ k.ORDERSEQ if k.ORDERSEQ is not none else 0 }}"
+        title="ZCATEGORY.uid={{ k.uid }} | STATUS=2 (child) | pUid={{ root.uid }} | TYPE={{ k.TYPE }} &mdash; drag to reorder within {{ root.NAME }}">
+      <td data-col="name" title="NAME">
+        <input type="text" value="{{ k.NAME }}"
+               onchange="patchField('/api/categories/{{ k.uid }}/{{ k.TYPE }}', 'NAME', this.value, this)">
+      </td>
+      <td class="amount" data-col="rows">{{ rows_cell(k.uid) }}</td>
+      <td class="amount" data-col="total">{{ total_cell(k.uid) }}</td>
+      <td data-col="uid"><span class="muted" style="font-size:11px;">{{ k.uid }}</span></td>
+      <td class="amount" data-col="order">{{ k.ORDERSEQ if k.ORDERSEQ is not none else '' }}</td>
+      <td data-col="deleted">{{ k.C_IS_DEL if k.C_IS_DEL not in (None, '') else '' }}</td>
+    </tr>
+    {% endfor %}
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2>Expense</h2>
+<div class="table-scroll">
+<table class="cat-table" id="expense-table">
+  <thead>
+    <tr>
+      <th data-col="name" title="ZCATEGORY.NAME">Category</th>
+      <th class="amount" data-col="rows" title="COUNT(INOUTCOME) where ctgUid=uid and IS_DEL=0">Rows</th>
+      <th class="amount" data-col="total" title="SUM(AMOUNT_ACCOUNT) grouped by account currency, shown side by side">Total</th>
+      <th data-col="uid" data-default-hidden="1" title="ZCATEGORY.uid, the real primary key">UID</th>
+      <th class="amount" data-col="order" data-default-hidden="1" title="ZCATEGORY.ORDERSEQ: display order in the picker">Order</th>
+      <th data-col="deleted" data-default-hidden="1" title="ZCATEGORY.C_IS_DEL: tombstone flag. Tombstoned categories are excluded from this list entirely so this column is always blank here.">Deleted</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for root, kids in expense_tree %}
+    <tr class="tree-root" draggable="true" data-uid="{{ root.uid }}" data-type="{{ root.TYPE }}"
+        data-group="root:{{ root.TYPE }}" data-label="{{ root.NAME }}"
+        data-orderseq-orig="{{ root.ORDERSEQ if root.ORDERSEQ is not none else 0 }}"
+        title="ZCATEGORY.uid={{ root.uid }} | STATUS=0 (root) | TYPE={{ root.TYPE }} &mdash; drag to reorder among root categories">
+      <td data-col="name" title="NAME">
+        <input type="text" value="{{ root.NAME }}"
+               onchange="patchField('/api/categories/{{ root.uid }}/{{ root.TYPE }}', 'NAME', this.value, this)">
+      </td>
+      <td class="amount" data-col="rows">{{ rows_cell(root.uid) }}</td>
+      <td class="amount" data-col="total">{{ total_cell(root.uid) }}</td>
+      <td data-col="uid"><span class="muted" style="font-size:11px;">{{ root.uid }}</span></td>
+      <td class="amount" data-col="order">{{ root.ORDERSEQ if root.ORDERSEQ is not none else '' }}</td>
+      <td data-col="deleted">{{ root.C_IS_DEL if root.C_IS_DEL not in (None, '') else '' }}</td>
+    </tr>
+    {% for k in kids %}
+    <tr class="tree-child" draggable="true" data-uid="{{ k.uid }}" data-type="{{ k.TYPE }}"
+        data-group="child:{{ root.uid }}" data-label="{{ root.NAME }} &gt; {{ k.NAME }}"
+        data-orderseq-orig="{{ k.ORDERSEQ if k.ORDERSEQ is not none else 0 }}"
+        title="ZCATEGORY.uid={{ k.uid }} | STATUS=2 (child) | pUid={{ root.uid }} | TYPE={{ k.TYPE }} &mdash; drag to reorder within {{ root.NAME }}">
+      <td data-col="name" title="NAME">
+        <input type="text" value="{{ k.NAME }}"
+               onchange="patchField('/api/categories/{{ k.uid }}/{{ k.TYPE }}', 'NAME', this.value, this)">
+      </td>
+      <td class="amount" data-col="rows">{{ rows_cell(k.uid) }}</td>
+      <td class="amount" data-col="total">{{ total_cell(k.uid) }}</td>
+      <td data-col="uid"><span class="muted" style="font-size:11px;">{{ k.uid }}</span></td>
+      <td class="amount" data-col="order">{{ k.ORDERSEQ if k.ORDERSEQ is not none else '' }}</td>
+      <td data-col="deleted">{{ k.C_IS_DEL if k.C_IS_DEL not in (None, '') else '' }}</td>
+    </tr>
+    {% endfor %}
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="muted">Totals are shown per account currency, side by side, since amounts are never converted between currencies.</p>
+
+<script>
+(function initColumnToggles() {
+  const tables = Array.from(document.querySelectorAll('table.cat-table'));
+  const toolbar = document.getElementById('col-toggles');
+  const storageKey = 'mmw_cols_categories';
+  const ths = Array.from(tables[0].querySelectorAll('thead th[data-col]'));
+  let hidden;
+  try { hidden = JSON.parse(localStorage.getItem(storageKey)); } catch (e) { hidden = null; }
+  if (!Array.isArray(hidden)) {
+    hidden = ths.filter(th => th.dataset.defaultHidden === '1').map(th => th.dataset.col);
+  }
+  function setVisible(col, visible) {
+    tables.forEach(table => {
+      table.querySelectorAll(`[data-col="${col}"]`).forEach(el => {
+        el.style.display = visible ? '' : 'none';
+      });
+    });
+  }
+  ths.forEach(th => {
+    const col = th.dataset.col;
+    const label = document.createElement('label');
+    label.className = 'muted';
+    label.style.cssText = 'font-size:12px; white-space:nowrap;';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !hidden.includes(col);
+    cb.addEventListener('change', () => {
+      setVisible(col, cb.checked);
+      hidden = cb.checked ? hidden.filter(c => c !== col) : Array.from(new Set([...hidden, col]));
+      localStorage.setItem(storageKey, JSON.stringify(hidden));
+    });
+    label.appendChild(cb);
+    label.append(' ' + th.textContent.trim());
+    toolbar.appendChild(label);
+    setVisible(col, cb.checked);
+  });
+})();
+
+// makeSortableRows/stageChange are defined in base.html's script, which runs
+// after this one; defer until the whole document (all scripts) has loaded.
+document.addEventListener('DOMContentLoaded', () => {
+  ['income-table', 'expense-table'].forEach(id => {
+    const table = document.getElementById(id);
+    makeSortableRows(table.querySelector('tbody'), {
+      groupKey: row => row.dataset.group,
+      url: row => `/api/categories/${row.dataset.uid}/${row.dataset.type}`,
+      label: row => row.dataset.label,
+    });
+  });
+});
+</script>
+{% endblock %}

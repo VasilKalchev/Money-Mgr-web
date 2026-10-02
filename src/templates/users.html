@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Users{% endblock %}
+{% block content %}
+<div class="card card-wide">
+  <h2>Users</h2>
+  <p class="muted" style="font-size:14px;">
+    Each user has their own database, Google Drive connection, backups and settings.
+    {% if proxy_header %}Users the reverse proxy logs in (<code>{{ proxy_header }}</code> header) get an account automatically.{% endif %}
+  </p>
+  <div class="table-scroll">
+  <table class="users-table">
+    <thead><tr><th>User</th><th>Role</th><th>Database</th><th>Created</th><th>Set password</th><th></th></tr></thead>
+    <tbody>
+    {% for u in rows %}
+    <tr>
+      <td>{{ u.name }}{% if u.name == user %} <span class="badge">you</span>{% endif %}
+        {% if not u.has_password %} <span class="badge" title="Can only log in through the reverse proxy">no password</span>{% endif %}</td>
+      <td>
+        {% if u.name == user %}{{ 'Admin' if u.admin else 'User' }}{% else %}
+        <form method="post" action="/users/{{ u.name }}/admin">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="admin" value="{{ '' if u.admin else '1' }}">
+          {{ 'Admin' if u.admin else 'User' }}
+          <button type="submit" class="link-btn" style="font-size:12px;">{{ 'make user' if u.admin else 'make admin' }}</button>
+        </form>
+        {% endif %}
+      </td>
+      <td class="muted">{{ u.db_name or 'none yet' }}</td>
+      <td class="muted nowrap">{{ u.created.replace('T', ' ') }}</td>
+      <td>
+        <form method="post" action="/users/{{ u.name }}/password" class="inline-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="password" name="password" minlength="8" required autocomplete="new-password" placeholder="New password">
+          <button type="submit" class="btn-secondary">Set</button>
+        </form>
+      </td>
+      <td>
+        {% if u.name != user %}
+        <form method="post" action="/users/{{ u.name }}/remove"
+              onsubmit="return confirm('Remove {{ u.name }}? Their data is moved to users/.removed/ in the data folder, not deleted.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="btn-secondary">Remove</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Add a user</h3>
+  <form method="post" action="/users">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="new-username">Username</label>
+    <input type="text" name="username" id="new-username" autocomplete="off" autocapitalize="none" required>
+    <label for="new-password">Password</label>
+    <input type="password" name="password" id="new-password" autocomplete="new-password" minlength="8" required>
+    <label class="check"><input type="checkbox" name="admin" value="1"> Admin (can manage users)</label>
+    <div class="actions"><button type="submit" class="btn-primary">Add user</button></div>
+  </form>
+</div>
+{% endblock %}

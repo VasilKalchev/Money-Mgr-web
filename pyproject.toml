@@ -1,0 +1,24 @@
+[project]
+name = "mmw"
+version = "0.0.0"
+description = "Money Mgr web: a self-hosted viewer/editor for Money Manager .mmbak backups"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "flask>=3.1",
+    "requests>=2.31",
+    "gunicorn>=22",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[tool.uv]
+# An application, not a library: nothing to build or install, only dependencies.
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

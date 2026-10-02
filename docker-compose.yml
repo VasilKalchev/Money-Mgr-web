@@ -1,0 +1,19 @@
+services:
+  mmw:
+    build: .
+    image: mmw:latest
+    container_name: mmw
+    environment:
+      - PUID=1000   # `id -u`: owns ./data and runs the app
+      - PGID=1000   # `id -g`
+      - TZ=Etc/UTC  # e.g. Europe/Sofia
+      # - MMW_COOKIE_SECURE=1               # only reached over HTTPS
+      # - MMW_TRUSTED_PROXIES=172.18.0.0/16 # the reverse proxy's address(es)
+      # - MMW_AUTH_HEADER=Remote-User       # trust the proxy's login (SSO proxies only)
+    volumes:
+      - ./data:/config:z  # z: relabel for SELinux hosts, a no-op elsewhere
+    # Plain HTTP, so only this machine can reach it. To publish it, put a
+    # TLS reverse proxy in front (see "Deploying publicly" in README.md).
+    ports:
+      - "127.0.0.1:5732:5732"
+    restart: unless-stopped

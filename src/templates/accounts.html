@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Accounts{% endblock %}
+{% block content %}
+<div class="filters" id="col-toggles">
+  <button type="button" class="btn-secondary" onclick="document.querySelector('.table-scroll table').resetColumnWidths()">Auto-fit columns</button>
+</div>
+<p class="muted">Drag a row to reorder it within its group.</p>
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr>
+      <th data-col="name" title="ASSETS.NIC_NAME">Name</th>
+      <th data-col="currency" title="ASSETS.currencyUid &rarr; CURRENCY.uid">Currency</th>
+      <th class="amount" data-col="txcount" title="COUNT(INOUTCOME) where assetUid=uid and IS_DEL=0">Transactions</th>
+      <th class="amount" data-col="balance" title="Derived: signed SUM(AMOUNT_ACCOUNT) over non-deleted rows, in the account's own currency">Balance</th>
+      <th data-col="flags" title="ASSETS.ZDATA: an app-internal status flag, not a text note. 0 = normal, 1 = soft-deleted, 2 = unknown/unconfirmed meaning, 3 = hidden in the app's UI.">Flags</th>
+      <th data-col="uid" data-default-hidden="1" title="ASSETS.uid, the real primary key">UID</th>
+      <th class="amount" data-col="order" data-default-hidden="1" title="ASSETS.ORDERSEQ: display order within its group">Order</th>
+      <th data-col="type" data-default-hidden="1" title="ASSETS.TYPE: rarely populated, purpose not fully reverse-engineered">Type</th>
+      <th data-col="card" data-default-hidden="1" title="ASSETS.CARD_ACCOUNT_NAME: populated only for card-type accounts">Card Account</th>
+      <th class="nowrap" data-col="updated" data-default-hidden="1" title="ASSETS.A_UTIME: last-write timestamp, epoch ms">Updated</th>
+    </tr>
+  </thead>
+  {% for group_name, group_rows in grouped_rows %}
+  <tbody class="account-group">
+    <tr class="tree-root">
+      <td colspan="10" data-col="group-header" title="ASSETGROUP.ACC_GROUP_NAME">{{ group_name or '(no group)' }}</td>
+    </tr>
+    {% for a in group_rows %}
+    <tr draggable="true" data-uid="{{ a.uid }}" data-group="{{ a.group_uid }}" data-label="{{ a.NIC_NAME }}"
+        data-orderseq-orig="{{ a.ORDERSEQ if a.ORDERSEQ is not none else 0 }}"
+        title="ASSETS.uid={{ a.uid }} &mdash; drag to reorder within its group"
+        {{ 'style="opacity:.55"' if a.account_flags in (1, '1') }}>
+      <td data-col="name" title="NIC_NAME">
+        <input type="text" value="{{ a.NIC_NAME }}"
+               onchange="patchField('/api/accounts/{{ a.uid }}', 'NIC_NAME', this.value, this)">
+      </td>
+      <td data-col="currency" title="currencyUid">{{ a.ISO }}</td>
+      <td class="amount" data-col="txcount" title="COUNT(INOUTCOME) where assetUid=uid and IS_DEL=0"><span class="js-num" data-raw="{{ a.tx_count }}">{{ a.tx_count | num }}</span></td>
+      <td class="amount" data-col="balance" title="Derived: signed SUM(AMOUNT_ACCOUNT) over non-deleted rows, in the account's own currency"><span class="js-amt" data-raw="{{ a.balance if a.balance is not none else 0 }}">{{ a.balance | amt if a.balance is not none else '0.00' }}</span></td>
+      <td data-col="flags" title="ZDATA (raw)={{ a.account_flags }}">
+        <select onchange="patchField('/api/accounts/{{ a.uid }}', 'ZDATA', this.value, this)">
+          {% for v, lbl in [('0','0 - normal'), ('1','1 - soft-deleted'), ('2','2 - unknown'), ('3','3 - hidden in UI')] %}
+          <option value="{{ v }}" {{ 'selected' if a.account_flags|string == v }}>{{ lbl }}</option>
+          {% endfor %}
+        </select>
+      </td>
+      <td data-col="uid" title="{{ a.uid }}"><span class="muted" style="font-size:11px;">{{ a.uid }}</span></td>
+      <td class="amount" data-col="order">{{ a.ORDERSEQ if a.ORDERSEQ is not none else '' }}</td>
+      <td data-col="type">{{ a.account_type if a.account_type not in (None, '', 0, '0') else '' }}</td>
+      <td data-col="card">{{ a.CARD_ACCOUNT_NAME or '' }}</td>
+      <td class="nowrap" data-col="updated"><span class="muted">{{ a.updated_str or '' }}</span></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+  {% endfor %}
+</table>
+</div>
+<script>
+(function initColumnToggles() {
+  const table = document.querySelector('.table-scroll table');
+  const toolbar = document.getElementById('col-toggles');
+  const storageKey = 'mmw_cols_accounts';
+  const ths = Array.from(table.querySelectorAll('thead th[data-col]'));
+  let hidden;
+  try { hidden = JSON.parse(localStorage.getItem(storageKey)); } catch (e) { hidden = null; }
+  if (!Array.isArray(hidden)) {
+    hidden = ths.filter(th => th.dataset.defaultHidden === '1').map(th => th.dataset.col);
+  }
+  function setVisible(col, visible) {
+    table.querySelectorAll(`[data-col="${col}"]`).forEach(el => {
+      el.style.display = visible ? '' : 'none';
+    });
+  }
+  ths.forEach(th => {
+    const col = th.dataset.col;
+    const label = document.createElement('label');
+    label.className = 'muted';
+    label.style.cssText = 'font-size:12px; white-space:nowrap;';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !hidden.includes(col);
+    cb.addEventListener('change', () => {
+      setVisible(col, cb.checked);
+      hidden = cb.checked ? hidden.filter(c => c !== col) : Array.from(new Set([...hidden, col]));
+      localStorage.setItem(storageKey, JSON.stringify(hidden));
+    });
+    label.appendChild(cb);
+    label.append(' ' + th.textContent.trim());
+    toolbar.appendChild(label);
+    setVisible(col, cb.checked);
+  });
+})();
+
+// makeSortableRows is defined in base.html's script, which runs after this
+// content block's script; defer until the whole document has loaded. Each
+// account group is its own tbody, but rows are still only ever reordered
+// within their own group (enforced by groupKey), so one call across the
+// whole table is fine.
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('tbody.account-group').forEach(tbody => {
+    makeSortableRows(tbody, {
+      groupKey: row => row.dataset.group,
+      url: row => `/api/accounts/${row.dataset.uid}`,
+      label: row => row.dataset.label,
+    });
+  });
+});
+</script>
+{% endblock %}

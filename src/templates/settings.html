@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<div class="card card-wide">
+  <h2>Database</h2>
+  {% if db.exists %}
+  <dl class="kv">
+    <dt>File</dt><dd>{{ db.name }}</dd>
+    <dt>Source</dt><dd>{{ 'Google Drive' if db.source == 'gdrive' else 'Uploaded manually' }}</dd>
+    <dt>Installed</dt><dd>{{ db.installed_at.replace('T', ' ') if db.installed_at else '-' }}</dd>
+    <dt>Last changed</dt><dd>{{ db.mtime | mtime }}</dd>
+    <dt>Size</dt><dd>{{ '{:,.1f}'.format(db.size / 1024 / 1024) }} MB</dd>
+    <dt>Local edits</dt><dd>{{ 'Yes - changed in this app since it was installed' if db.local_modified else 'None' }}</dd>
+    <dt>Backups</dt><dd>{{ db.backups }}{% if db.latest_backup %}, newest {{ db.latest_backup }}{% endif %}</dd>
+  </dl>
+  {% else %}
+  <p class="muted" style="font-size:14px;">No database yet. <a href="/setup">Set one up</a>, or use the options below.</p>
+  {% endif %}
+
+  <h3>Upload a {{ 'replacement ' if db.exists }}file</h3>
+  <form method="post" action="/db/upload" enctype="multipart/form-data"
+        {% if db.exists %}onsubmit="return confirm('Replace the current database with this file? The current one is backed up first.');"{% endif %}>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="file" name="db_file" accept=".mmbak,.sqlite,.db" required>
+    <div class="actions"><button type="submit" class="btn-secondary">Upload</button></div>
+  </form>
+
+  <h3>Google Drive</h3>
+  {% if gdrive_connected %}
+  <p class="muted" style="font-size:14px;">Connected. Pulls the newest <code>MM*.mmbak</code> from the <code>{{ gdrive_folder }}</code> folder. Nothing is written to Drive.</p>
+  <div class="actions" style="margin-top:8px;">
+    <form method="post" action="/db/sync"
+          {% if db.exists and db.local_modified %}onsubmit="if (confirm('This database has edits that were never synced. If a newer snapshot exists, it will replace them (a backup is taken first). Continue?')) { this.overwrite.value = '1'; return true; } return false;"{% endif %}>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="overwrite" value="">
+      <button type="submit" class="btn-primary">Sync now</button>
+    </form>
+    <a class="btn-secondary" href="/setup/gdrive">Reconnect</a>
+    <form method="post" action="/gdrive/disconnect" onsubmit="return confirm('Disconnect from Google Drive? The current database is kept.');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="btn-secondary">Disconnect</button>
+    </form>
+  </div>
+  {% else %}
+  <p class="muted" style="font-size:14px;">Not connected.</p>
+  <div class="actions" style="margin-top:8px;"><a class="btn-secondary" href="/setup/gdrive">Set up Google Drive sync</a></div>
+  {% endif %}
+
+  <div class="actions">
+    <button type="button" class="btn-secondary adv-toggle" onclick="toggleAdvanced()">Advanced options</button>
+  </div>
+</div>
+
+<div class="card card-wide adv" style="margin-top:16px;">
+  <h2>Backups</h2>
+  <p class="muted">Snapshots of the database are kept in <code>{{ db.backup_dir }}</code>, one folder per backup.
+    One is always taken before an upload or Drive sync replaces the database.</p>
+  {% if db.exists %}
+  <form method="post" action="/db/backup">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="btn-secondary">Back up now</button>
+  </form>
+  {% endif %}
+  <form method="post" action="/settings/backups">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="backup-keep">Backups to keep</label>
+    <input type="number" name="keep" id="backup-keep" min="0" max="1000" step="1" value="{{ backup_cfg.keep }}" style="width:120px;">
+    <p class="muted">The oldest are deleted beyond this number. 0 keeps all of them.</p>
+    <label class="check"><input type="checkbox" name="on_first_write" value="1" {{ 'checked' if backup_cfg.on_first_write }}>
+      Back up before the first edit after the app starts or a database is installed</label>
+    <label class="check"><input type="checkbox" name="diff" value="1" {{ 'checked' if backup_cfg.diff }}>
+      Write a <code>diff.txt</code> of changes since the previous backup (slower on large databases)</label>
+    <div class="actions"><button type="submit" class="btn-primary">Save</button></div>
+  </form>
+</div>
+
+<div class="card card-wide" style="margin-top:16px;">
+  <form method="post" action="/settings">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <h2>Display locale</h2>
+    <p class="muted">Controls how dates, times, and numbers are formatted across the app. "Auto" follows your browser's own locale (usually matches your system).</p>
+    <label for="locale-select">Locale</label>
+    <select name="locale" id="locale-select">
+      {% for value, label in locale_options %}
+      <option value="{{ value }}" {{ 'selected' if value == current_locale }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <div class="actions">
+      <button type="submit" class="btn-primary">Save</button>
+    </div>
+  </form>
+</div>
+
+<div class="card card-wide" style="margin-top:16px;">
+  <form method="post" action="/account/password">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <h2>Account</h2>
+    <p class="muted">Logged in as <strong>{{ user }}</strong>{{ ' by the reverse proxy' if via_proxy }}.
+      {% if not has_password %}You have no password yet, so you can only log in through the proxy. Setting one lets you use the login form too.{% endif %}</p>
+    {% if has_password %}
+    <label for="pw-current">Current password</label>
+    <input type="password" name="current" id="pw-current" autocomplete="current-password" required>
+    {% endif %}
+    <label for="pw-new">New password</label>
+    <input type="password" name="password" id="pw-new" autocomplete="new-password" minlength="8" required>
+    <label for="pw-new2">New password again</label>
+    <input type="password" name="password2" id="pw-new2" autocomplete="new-password" minlength="8" required>
+    <div class="actions">
+      <button type="submit" class="btn-secondary">{{ 'Change' if has_password else 'Set' }} password</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

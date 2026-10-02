@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Create admin account' if mode == 'first' else 'Log in' }}{% endblock %}
+{% block content %}
+<div class="card" style="margin: 40px auto 0;">
+  {% if mode == 'first' %}
+  <h2>Create the admin account</h2>
+  <p class="muted" style="font-size:14px;">
+    This is the first run with accounts. The admin can add more users later; each user has their own
+    database, Google Drive connection and backups.
+    If this install already had a database, it becomes this account's.
+  </p>
+  <form method="post" action="/setup/account">
+    <label for="setup-code">Setup code</label>
+    <input type="text" name="setup_code" id="setup-code" autocomplete="off" required autofocus
+           value="{{ request.form.get('setup_code', '') }}">
+    <p class="muted">Printed in the app's log, so only whoever runs the server can create this account:
+      <code>docker compose logs money-mgr-web</code>, or the terminal running <code>app.py</code>.</p>
+  {% else %}
+  <h2>Log in</h2>
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{{ next }}">
+  {% endif %}
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="username">Username</label>
+    <input type="text" name="username" id="username" autocomplete="username" autocapitalize="none" required {{ 'autofocus' if mode != 'first' }}
+           value="{{ request.form.get('username', '') }}">
+    <label for="password">Password</label>
+    <input type="password" name="password" id="password" required
+           autocomplete="{{ 'new-password' if mode == 'first' else 'current-password' }}"
+           {% if mode == 'first' %}minlength="8"{% endif %}>
+    {% if mode == 'first' %}
+    <label for="password2">Password again</label>
+    <input type="password" name="password2" id="password2" autocomplete="new-password" minlength="8" required>
+    {% endif %}
+    <div class="actions">
+      <button type="submit" class="btn-primary">{{ 'Create account' if mode == 'first' else 'Log in' }}</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

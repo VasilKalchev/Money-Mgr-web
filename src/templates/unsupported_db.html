@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Unsupported database{% endblock %}
+{% block content %}
+<div class="card">
+  <h2 style="margin-top:0;">Unsupported database</h2>
+  <p>{{ reason }}</p>
+  <p class="muted">
+    <code>{{ db_name }}</code> was not opened. This viewer's queries and
+    inserts are only verified against the schema versions listed above, and
+    other versions may have different columns. Upload a different file in
+    <a href="/settings">Settings</a>.
+  </p>
+</div>
+{% endblock %}
