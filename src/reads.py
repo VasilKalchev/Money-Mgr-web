@@ -249,6 +249,7 @@ def parse_transaction_filters(con, args):
     # Root categories selected on their own, without their children.
     category_only_uids = [v for v in args.getlist("category_only") if v]
     do_types = [v for v in args.getlist("type") if v]
+    transfer_ids = [v for v in args.getlist("transfer_id") if v]
     date_from = args.get("from", "")
     date_to = args.get("to", "")
     q_note = args.get("q_note", "")
@@ -285,6 +286,9 @@ def parse_transaction_filters(con, args):
     if do_types:
         placeholders = ",".join("?" for _ in do_types)
         filter_specs.append(("type", f"i.DO_TYPE IN ({placeholders})", list(do_types)))
+    if transfer_ids:
+        placeholders = ",".join("?" for _ in transfer_ids)
+        filter_specs.append(("transfer_id", f"i.txUidTrans IN ({placeholders})", list(transfer_ids)))
     if date_from:
         filter_specs.append(("date_from", "i.WDATE >= ?", [date_from]))
     if date_to:
@@ -338,7 +342,7 @@ def parse_transaction_filters(con, args):
 
     return {
         "account_uids": account_uids, "category_uids": category_uids,
-        "category_only_uids": category_only_uids, "do_types": do_types,
+        "category_only_uids": category_only_uids, "do_types": do_types, "transfer_ids": transfer_ids,
         "date_from": date_from, "date_to": date_to, "q_note": q_note, "q_desc": q_desc,
         "has_note": has_note, "has_desc": has_desc, "amount_min": amount_min, "amount_max": amount_max,
         "entered_currency": entered_currency, "show_deleted": show_deleted, "show_mirror": show_mirror,

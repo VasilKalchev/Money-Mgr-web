@@ -169,6 +169,13 @@ paths:
           in: query
           description: Type code (not name).
           schema: {type: array, items: {$ref: "#/components/schemas/TypeCode"}}
+        - name: transfer_id
+          in: query
+          description: |
+            A transfer's `transfer_id`, shared by its two rows. Combine with
+            `show_mirror`: by default only the sending row is listed, with
+            `show` both, with `only` the mirror.
+          schema: {type: array, items: {type: string}}
         - name: from
           in: query
           description: First date, inclusive.

@@ -15,6 +15,8 @@ Notable changes to Money Mgr web. The format follows
 - API: `GET /categories?show_deleted=show` lists deleted categories too,
   so a transaction that keeps a deleted category can still be shown with
   its name and root. Every category now has `deleted`.
+- API: `GET /transactions` filters by `transfer_id` (repeatable), to find
+  the other row of a transfer.
 
 ## [1.3.0] - 2026-10-04
 

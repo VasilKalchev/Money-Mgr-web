@@ -370,6 +370,22 @@ def test_add_transfer_with_the_amount_that_arrived(api):
     assert [(m["transfer_id"], m["amount"], m["entered_amount"]) for m in mirror] == [(t["transfer_id"], 107.5, 107.5)]
 
 
+def test_list_by_transfer_id(api):
+    ids = [api.post("transactions", {"type": "transfer", "account": "a1", "to_account": "a2", "amount": n})
+           .get_json()["transaction"]["transfer_id"] for n in (1, 2, 3)]
+
+    def listed(qs):
+        rows = api.get(f"transactions?{qs}").get_json()["transactions"]
+        return sorted((r["transfer_id"], r["account_uid"]) for r in rows)
+
+    qs = f"transfer_id={ids[0]}&transfer_id={ids[2]}"
+    assert listed(qs) == sorted([(ids[0], "a1"), (ids[2], "a1")])
+    assert listed(qs + "&show_mirror=only") == sorted([(ids[0], "a2"), (ids[2], "a2")])
+    assert len(listed(qs + "&show_mirror=show")) == 4
+    assert listed(f"transfer_id={ids[1]}&account=a2&show_mirror=show") == [(ids[1], "a2")]
+    assert listed("transfer_id=nope") == []
+
+
 def test_patch_entered_values_are_written_as_is(api):
     # restating a pre-euro row: the entered BGN must stay exact
     t = api.patch("transactions/t1", {"amount": 5.11, "entered_amount": 10, "entered_currency": "USD"}).get_json()["transaction"]
