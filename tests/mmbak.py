@@ -22,11 +22,19 @@ CREATE TABLE ASSETS (ID integer primary key autoincrement, NIC_NAME varchar, ORD
   TYPE integer, ZDATA varchar, AMOUNT varchar, CARD_ACCOUNT_NAME varchar, A_UTIME INTEGER, uid TEXT,
   currencyUid TEXT, groupUid TEXT);
 CREATE TABLE ASSETGROUP (DEVICE_ID INTEGER PRIMARY KEY autoincrement, ACC_GROUP_NAME VARCHAR,
-  ORDERSEQ INTEGER, uid TEXT);
+  ORDERSEQ INTEGER, TYPE INTEGER, uid TEXT);
 CREATE TABLE CURRENCY (ID integer primary key autoincrement, ISO varchar, RATE real,
-  DECIMAL_POINT integer, uid TEXT);
+  DECIMAL_POINT integer, SYMBOL varchar, IS_MAIN_CURRENCY integer, ORDER_SEQ integer, uid TEXT);
 CREATE TABLE ZCATEGORY (ID integer primary key autoincrement, C_IS_DEL integer, C_UTIME INTEGER,
   NAME varchar, ORDERSEQ integer, TYPE integer, STATUS integer, uid TEXT, pUid TEXT);
+CREATE TABLE ZETC (dataTypeKey TEXT, ZDATA TEXT);
+CREATE TABLE FAVTRANSACTION (DEVICE_ID INTEGER PRIMARY KEY, IS_DEL INTEGER, USETIME INTEGER, DO_TYPE INTEGER,
+  AMOUNT_SUB REAL, MEMO VARCHAR, PAYEE VARCHAR, ORDERSEQ INTEGER, uid TEXT, currencyUid TEXT, assetUid TEXT,
+  toAssetUid TEXT, ctgUid TEXT);
+CREATE TABLE BUDGET (ID INTEGER PRIMARY KEY, DO_TYPE INTEGER, PERIOD_TYPE INTEGER, IS_TOTAL INTEGER,
+  IS_DEL INTEGER, ORDER_SEQ INTEGER, uid TEXT, targetUid TEXT);
+CREATE TABLE BUDGET_AMOUNT (ID INTEGER PRIMARY KEY, IS_DEL INTEGER, AMOUNT REAL, BUDGET_PERIOD INTEGER,
+  budgetUid TEXT);
 """
 
 # uid, WDATE, DO_TYPE (0 income, 1 expense, 4 mirror), amount, account, category,
@@ -45,9 +53,11 @@ def build(path, user_version=19):
     con = sqlite3.connect(path)
     con.executescript(SCHEMA)
     # RATE is the rate to the main currency (EUR), used to restate ZMONEY.
-    con.executemany("INSERT INTO CURRENCY (ISO, RATE, DECIMAL_POINT, uid) VALUES (?, ?, 2, ?)",
-                    [("EUR", 1.0, "cur-eur"), ("USD", 0.9, "cur-usd")])
-    con.execute("INSERT INTO ASSETGROUP (ACC_GROUP_NAME, ORDERSEQ, uid) VALUES ('Cash', 1, 'g1')")
+    con.executemany("INSERT INTO CURRENCY (ISO, RATE, DECIMAL_POINT, SYMBOL, IS_MAIN_CURRENCY, ORDER_SEQ, uid)"
+                    " VALUES (?, ?, 2, ?, ?, ?, ?)",
+                    [("EUR", 1.0, "€", 1, 100, "cur-eur"), ("USD", 0.9, "US$", 0, 101, "cur-usd")])
+    con.execute("INSERT INTO ASSETGROUP (ACC_GROUP_NAME, ORDERSEQ, TYPE, uid) VALUES ('Cash', 1, 11, 'g1')")
+    con.executemany("INSERT INTO ZETC VALUES (?, ?)", [("week_start_day", "1"), ("start_day", "1")])
     con.executemany(
         "INSERT INTO ASSETS (NIC_NAME, ORDERSEQ, ZDATA, uid, currencyUid, groupUid) VALUES (?, ?, '0', ?, ?, 'g1')",
         [("Wallet", 1, "a1", "cur-eur"), ("Bank", 2, "a2", "cur-usd")],

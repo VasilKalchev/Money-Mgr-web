@@ -166,7 +166,7 @@
 
   <div class="filters filter-group">
     <button type="submit">Filter</button>
-    <a href="/transactions" class="btn-secondary" style="padding:6px 14px;">Reset</a>
+    <a href="{{ url_for('transactions') }}" class="btn-secondary" style="padding:6px 14px;">Reset</a>
     <button type="button" class="btn-secondary adv-toggle" onclick="toggleAdvanced()" title="Show or hide the less common filters and tools">Advanced</button>
   </div>
 </form>
@@ -291,16 +291,16 @@
   </thead>
   <tbody>
     {% for r in rows %}
-    <tr data-uid="{{ r.uid }}" data-account="{{ r.account_uid }}" data-zdate="{{ r.zdate_ms }}" data-wdate="{{ r.WDATE }}"
+    <tr data-uid="{{ r.uid }}" data-account="{{ r.account_uid }}" data-zdate="{{ r.ZDATE }}" data-wdate="{{ r.WDATE }}"
         data-label="{{ r.WDATE }} {{ r.tx_time }} &middot; {{ r.ZCONTENT or r.category_path or (r.account_name ~ ' transaction') }}"
-        title="INOUTCOME.uid={{ r.uid }} | DO_TYPE={{ r.DO_TYPE }}{{ ' | IS_DEL=' ~ r.is_del if r.is_del and r.is_del != 0 }}"
-        {{ 'style="opacity:.55" data-deleted="1"'|safe if r.is_del and r.is_del != 0 }}>
+        title="INOUTCOME.uid={{ r.uid }} | DO_TYPE={{ r.DO_TYPE }}{{ ' | IS_DEL=' ~ r.IS_DEL if r.IS_DEL and r.IS_DEL != 0 }}"
+        {{ 'style="opacity:.55" data-deleted="1"'|safe if r.IS_DEL and r.IS_DEL != 0 }}>
       <td><input type="checkbox" class="row-select" data-uid="{{ r.uid }}"></td>
       <td class="nowrap" data-col="date" title="WDATE (text date) = {{ r.WDATE }}">
         <span class="js-date-display" tabindex="0"></span>
         <input type="text" inputmode="numeric" class="date-input" value="{{ r.WDATE }}" pattern="\d{4}-\d{2}-\d{2}" placeholder="YYYY-MM-DD" onchange="patchDateTime(this)" style="display:none">
       </td>
-      <td class="nowrap" data-col="time" title="ZDATE (epoch ms, local time) = {{ r.zdate_ms }}">
+      <td class="nowrap" data-col="time" title="ZDATE (epoch ms, local time) = {{ r.ZDATE }}">
         <span class="js-time-display" tabindex="0"></span>
         <input type="text" inputmode="numeric" class="time-input" value="{{ r.tx_time }}" pattern="\d{2}:\d{2}(:\d{2})?" placeholder="HH:MM:SS" onchange="patchDateTime(this)" style="display:none">
         <span class="group-diff" style="font-size:11px;"></span>
@@ -319,7 +319,7 @@
         {% endif %}
       </td>
       {% if r.editable_category %}
-      <td data-col="category" title="ctgUid={{ r.category_uid }} | tree={{ 'income' if r.tree_type == 0 else 'expense' }}">
+      <td data-col="category" title="ctgUid={{ r.ctgUid }} | tree={{ 'income' if r.tree_type == 0 else 'expense' }}">
         <select class="root-select" data-type="{{ r.tree_type }}"
                 onchange="onRootChange(this)">
           {% for root in category_trees[r.tree_type] %}
@@ -327,8 +327,8 @@
           {% endfor %}
         </select>
       </td>
-      <td data-col="subcategory" title="ctgUid={{ r.category_uid }}">
-        <select class="sub-select" data-current="{{ r.category_uid }}"
+      <td data-col="subcategory" title="ctgUid={{ r.ctgUid }}">
+        <select class="sub-select" data-current="{{ r.ctgUid }}"
                 onchange="patchField('/api/transactions/{{ r.uid }}', 'ctgUid', this.value, this)">
         </select>
       </td>
@@ -355,8 +355,8 @@
                onchange="patchAmount('/api/transactions/{{ r.uid }}', this)">
         {{ r.account_currency_iso }}
       </td>
-      <td class="amount" data-col="entered" title="IN_ZMONEY (raw)={{ r.entered_amount }}">
-        {% if r.entered_amount not in (None, '') %}<span class="js-amt" data-raw="{{ r.entered_amount }}">{{ r.entered_amount | amt }}</span> {{ r.currency_iso }}{% endif %}
+      <td class="amount" data-col="entered" title="IN_ZMONEY (raw)={{ r.IN_ZMONEY }}">
+        {% if r.IN_ZMONEY not in (None, '') %}<span class="js-amt" data-raw="{{ r.IN_ZMONEY }}">{{ r.IN_ZMONEY | amt }}</span> {{ r.currency_iso }}{% endif %}
       </td>
       <td data-col="uid" title="{{ r.uid }}">
         <span class="muted" style="font-size:11px;">{{ r.uid }}</span>
@@ -365,7 +365,7 @@
         <span class="muted">{{ r.updated_str or '' }}</span>
       </td>
       <td class="nowrap">
-        {% if not r.is_del or r.is_del == 0 %}
+        {% if not r.IS_DEL or r.IS_DEL == 0 %}
         <button type="button" class="btn-secondary delete-btn" title="Delete this transaction (staged until you click Save)" onclick="toggleDelete(this.closest('tr'))">Delete</button>
         {% endif %}
       </td>

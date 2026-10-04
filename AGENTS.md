@@ -4,6 +4,10 @@ A self-hosted Flask viewer/editor for a Money Manager (Android app) SQLite
 export (`.mmbak` file). Multi-user: each account has its own database, Drive
 connection, backups and settings.
 
+Two frontends share the backend: the app at `/`, an installable phone layout
+modelled on Money Manager's own screens, and the editor under `/editor/`
+(transactions, accounts, categories), the dense pages for deep edits.
+
 ## Running
 
 ```
@@ -20,13 +24,15 @@ itself (`MM*.mmbak` files, `docs/MM_DB_SCHEMA.md`).
 Each area has its own `AGENTS.md` with the details; read the one for the
 area you are working in.
 
-- `src/` - the Python backend: `app.py` (all routes, read SQL, auth/CSRF),
-  `edits.py` (every write to the MM database outside sync), `dbstore.py`,
-  `users.py`, `gdrive.py`, `merge.py`, `dbsync.py`.
+- `src/` - the Python backend: `app.py` (all routes, auth/CSRF),
+  `reads.py` and `edits.py` (every read and write of the MM database
+  outside sync), `dbstore.py`, `users.py`, `gdrive.py`, `merge.py`,
+  `dbsync.py`.
   See `src/AGENTS.md`.
-  - `src/templates/` - Jinja2 pages and the frontend conventions.
-    See `src/templates/AGENTS.md`.
-  - `src/static/` - PWA files. See `src/static/AGENTS.md`.
+  - `src/templates/` - Jinja2 pages and the frontend conventions; the app
+    is `app.html`. See `src/templates/AGENTS.md`.
+  - `src/static/` - PWA files, and the app's JS and CSS in `static/app/`.
+    See `src/static/AGENTS.md`.
 - `tests/` - pytest suite and how to verify changes. See `tests/AGENTS.md`.
 - `docker/`, `Dockerfile`, `docker-compose.yml` - image packaging.
   See `docker/AGENTS.md`.

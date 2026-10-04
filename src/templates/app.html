@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#232731">
+<title>Money Mgr web</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/app/app.css?v={{ app_version }}">
+<script id="app-config" type="application/json">{{ {
+  "csrf": csrf_token(), "locale": user_locale, "user": user, "admin": is_admin,
+  "version": app_version, "sync_pending": sync_pending,
+} | tojson }}</script>
+<script src="/static/app/app.js?v={{ app_version }}" defer></script>
+</head>
+<body>
+<div id="main">
+  <header class="topbar" id="topbar"></header>
+  <div id="view" class="view"></div>
+  <button type="button" class="fab" id="fab" aria-label="Add"></button>
+  <nav class="bottomnav" id="bottomnav"></nav>
+</div>
+<div id="page" class="screen page" hidden></div>
+<div id="form" class="screen" hidden></div>
+<div id="sheet" class="sheet" hidden></div>
+<div id="toast" class="toast" role="status" hidden></div>
+<div id="dialog" class="dialog" hidden></div>
+<form id="logout-form" method="post" action="/logout" hidden>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+</form>
+</body>
+</html>

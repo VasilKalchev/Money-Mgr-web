@@ -1,10 +1,7 @@
-"""/transactions filters against the synthetic export in mmbak.py."""
+"""The editor's transaction filters against the synthetic export in mmbak.py."""
 import re
 
 import pytest
-from werkzeug.datastructures import MultiDict
-
-import app as appmod
 
 
 def uids(client, qs=""):
@@ -75,33 +72,9 @@ def test_sql_injection_is_bound_not_interpolated(client):
     assert len(uids(client)) == 4  # table intact
 
 
-def test_build_where_exclude():
-    args = MultiDict([("account", "a1"), ("show_deleted", "only")])
-    f = appmod.parse_transaction_filters(args)
-    where, params = f["build_where"]()
-    assert "i.IS_DEL <> 0" in where and "assetUid" in where and params == ["a1"]
-    where, params = f["build_where"](exclude="show_deleted")
-    assert "IS_DEL" not in where and "assetUid" in where
-    where, params = f["build_where"](exclude="account")
-    assert "assetUid" not in where and params == []
-
-
-def test_empty_where_is_valid_sql():
-    f = appmod.parse_transaction_filters(MultiDict([("show_deleted", "show"), ("show_mirror", "show")]))
-    assert f["build_where"]() == ("1=1", [])
-
-
-def test_text_search_clause():
-    clause, param = appmod.text_search_clause("c", "a%b_c\\d")
-    assert "LIKE" in clause and "NOT" not in clause
-    assert param == "%a\\%b\\_c\\\\d%"
-    clause, param = appmod.text_search_clause("c", "!foo")
-    assert "NOT LIKE" in clause and param == "%foo%"
-
-
 def test_page_match_count_narrows(client):
     def count(qs):
-        html = client.get(f"/transactions?{qs}").get_data(as_text=True)
+        html = client.get(f"/editor/transactions?{qs}").get_data(as_text=True)
         m = re.search(r'data-raw="(\d+)">[^<]*</span> matching transactions', html)
         assert m, "match count not found in page"
         return int(m.group(1))
@@ -120,17 +93,3 @@ def test_group_stats(client):
     # t1,t2 (a1) | t3,t4 (a2) | t5,t6 (a1)
     assert d["groups"] == 3 and d["multi_groups"] == 3
     assert d["avg_size"] == 2 and d["median_gap_sec"] == 1
-
-
-def test_category_tree(client):
-    with client.application.test_request_context():
-        from flask import g
-        g.user = "alice"
-        tree = appmod.build_category_tree(1)
-    by_uid = {r["uid"]: r for r in tree}
-    assert [c["uid"] for c in by_uid["c-food"]["children"]] == ["c-food-out"]
-    assert by_uid["c-fun"]["children"] == []
-    assert "c-food-out" not in by_uid  # children aren't roots
-    with client.application.test_request_context():
-        g.user = "alice"
-        assert [r["uid"] for r in appmod.build_category_tree(0)] == ["c-salary"]

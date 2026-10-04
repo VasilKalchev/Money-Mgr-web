@@ -12,7 +12,9 @@ Add a test next to the code you change:
 
 - `test_users.py`: accounts, throttling
 - `test_dbstore.py`: install, backups
-- `test_filters.py`: /transactions filters
+- `test_filters.py`: the editor's transaction filters
+- `test_reads.py`: `reads.py`, on a plain connection without Flask
+- `test_app.py`: the app at `/` and its `/api/app/` routes
 - `test_edits.py`: the pages' write routes and `edits.py`, upload
 - `test_gdrive.py`: OAuth and Drive I/O, `requests` faked
 - `test_merge.py`: the merge engine
@@ -37,7 +39,7 @@ cd src && python3 -c "
 from app import app; import users
 c = app.test_client(); name = next(iter(users.all_users()))
 with c.session_transaction() as s: s.update(user=name, ver=users.get(name)['session_version'], csrf='t')
-r = c.get('/transactions?page_size=25'); print(r.status_code)"
+r = c.get('/editor/transactions?page_size=25'); print(r.status_code)"
 ```
 
 Run it from `src/`. To experiment without touching real data, point

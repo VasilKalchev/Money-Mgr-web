@@ -2,8 +2,11 @@
 
 ## Modules
 
-- `app.py`: all routes, the read SQL, and helpers, including login/CSRF
-  hooks and the user admin routes. No blueprints/models.
+- `app.py`: all routes and helpers, including login/CSRF hooks and the
+  user admin routes. No blueprints/models.
+- `reads.py`: every read of the MM database outside sync (the transaction
+  list, its filters and their counts, accounts, categories, lookups). The
+  pages and both APIs call it; see "Reading the database".
 - `edits.py`: every write to the MM database outside sync (transactions,
   accounts, categories). Both APIs call it; see "Writing to the database".
 - `dbstore.py`: where data lives: `DATA_DIR` (`MMW_DATA_DIR` env, `/config`
@@ -54,17 +57,20 @@ user created.
 
 ## API routes
 
-- `/api/...` (no version): the pages' own JSON helpers, session-only, free
-  to change with the templates.
+- `/api/app/...`: the app's own JSON (`/` and `static/app/`), session-only
+  and free to change with it. Shaped per screen: rows grouped by day, totals
+  in the main currency, balances. Don't grow `/api/v1/` for the app.
+- `/api/...` (no version): the editor pages' own JSON helpers, session-only,
+  free to change with the templates.
 - `/api/v1/...`: the public API, documented in `docs/openapi.yaml`; keep
   it in step (`tests/test_openapi.py` checks the spec against the routes
-  and their responses) and don't make breaking changes to the API. It reuses the page code
-  (`parse_transaction_filters`, `get_account_rows`, and `edits` for writes).
+  and their responses) and don't make breaking changes to the API. Like
+  the pages, it reads through `reads` and writes through `edits`.
   Raise `ApiError(message, status)` for bad input; it's answered as
   `{"ok": false, "error": ...}`, as are `edits.EditError`s and 404/405
   under `/api/`.
-- Both are thin: they parse the request, call `edits`, and shape the
-  answer. The pages' routes map the MM column a page names
+- Both are thin: they parse the request, call `reads` or `edits`, and
+  shape the answer. The pages' routes map the MM column a page names
   (`TRANSACTION_FIELDS` etc.) to the `edits` field.
 
 ## Supported databases
@@ -81,21 +87,45 @@ version only after checking its schema against `docs/MM_DB_SCHEMA.md`.
   default; pass `readonly=False` for writes (this also triggers the
   one-time backup). Either way MMW's change log (`changes.sqlite`, table
   `mmw_changes`, see `docs/SYNC.md`) is attached as `mmw`.
-- `query(sql, params)`: read helper, returns `fetchall()`.
+- `read_db()`: a read-only connection for a request's reads, which it
+  passes to `reads` functions.
 - `write_db()`: a writable connection for one edit, committed when the
   `with` block ends and discarded if it raises. Temp triggers stamp every
   `INOUTCOME` row it inserts or updates in the change log, in the same
   commit.
 - Row factory is `sqlite3.Row`, so results are accessed by column name.
 - Filter bars build SQL dynamically with parallel `filters` (SQL fragments)
-  and `params` (bound values) lists, joined with `AND`. See `/transactions`
-  in `app.py` for the pattern to follow when adding new filters.
+  and `params` (bound values) lists, joined with `AND`. See
+  `parse_transaction_filters()` in `reads.py` for the pattern to follow
+  when adding new filters.
+
+## Reading the database
+
+Every read of the MM database outside sync goes through `reads.py`, with a
+connection from `read_db()`, or from `write_db()` when the read has to see
+an edit in progress (v1's `expect`, and its answers to writes). Functions
+return `sqlite3.Row` rows or plain lists/dicts, and routes shape them for a
+page or an API answer. Transaction rows all come from one SELECT
+(`_TX_SELECT`, which also gives `changed_ms`, when MMW saw the row change,
+as `updated_since` and the `changed` sort use it), so the pages and the API
+list the same columns. Add a new kind of read there, not in a route.
+`reads.py` doesn't import Flask.
+
+Totals follow the app: income and expense are `DO_TYPE` 0 and 1 only (no
+transfers or balance adjustments), each row converted to the main currency
+(`CURRENCY.RATE`) and rounded to cents before adding up, as the app's own
+`ZMONEY` is (`reads.sums()`'s `in_main`). Balances add up the raw
+`AMOUNT_ACCOUNT` in the account's own currency.
 
 ## Writing to the database
 
 Every write outside sync goes through `edits.py`, with a connection from
-`write_db()`: `create_transaction`, `update_transaction`,
-`delete_transaction`, `update_account` and `update_category`. They take
+`write_db()`: `create_transaction` (a transfer's fee too),
+`update_transaction`, `delete_transaction`, `create_account`,
+`update_account`, `move_account`, `create_category`, `update_category`,
+`move_category`, `delete_category`, `create_bookmark` and
+`delete_bookmark`. New rows take the column values the app writes
+(`*_DEFAULTS`), since it reads `''` where SQLite would put NULL. They take
 named fields (`note`, `amount`, `name`, ...), never columns, and keep the
 rules the app relies on: `WDATE` and `ZDATE` together, a transfer's two
 rows in step, `IN_ZMONEY`/`ZMONEY` restated with the amount, categories
@@ -107,7 +137,7 @@ not in a route. `edits.py` doesn't import Flask; it raises `EditError`.
 
 - `INOUTCOME.AMOUNT_ACCOUNT` is always a positive magnitude in the
   transaction's own **account's currency** (`ASSETS.currencyUid`, joined as
-  `acu`/`account_currency_iso` in `/transactions`). Sign is implied by
+  `acu`/`account_currency_iso` in `reads._TX_SELECT`). Sign is implied by
   `DO_TYPE`, not stored.
 - `INOUTCOME.IN_ZMONEY` is the amount as originally **entered** by the user,
   in `INOUTCOME.currencyUid` (joined as `cu`/`currency_iso`). This can

@@ -1,7 +1,9 @@
 # Templates and frontend conventions
 
-Jinja2 templates, one per page. `base.html` is the shared layout with nav
-and the column-toggle/sort JS helpers. `setup.html`, `gdrive_setup.html` and
+Jinja2 templates, one per page. `app.html` is the app at `/`: a standalone
+shell (not `base.html`) whose screens `static/app/app.js` renders from
+`/api/app/`; see "The app" below. `base.html` is the editor's shared layout
+with nav and the column-toggle/sort JS helpers. `setup.html`, `gdrive_setup.html` and
 `settings.html` handle database provisioning, `sync.html` reviews a merge;
 `login.html` (login and first-run admin creation) and `users.html` handle
 accounts.
@@ -30,3 +32,17 @@ accounts.
   `app.py` (`TRANSACTION_FIELDS`, `ACCOUNT_FIELDS`, `CATEGORY_FIELDS`). The
   route maps it to a field in `src/edits.py`, which checks the value. Bulk
   edits stage one PATCH per row.
+
+## The app (`app.html`, `static/app/`)
+
+- One page, plain JS, no build step. Routes are in the URL hash (see the
+  comment at the top of `app.js`); the form and the pages over the main
+  screen are history entries, so Android's Back closes them.
+- Render with the `h` tagged template, which escapes every value; wrap
+  only trusted markup (icons, other `h` results) in `raw()`.
+- Its layout follows Money Manager's (sizes were measured on a phone running
+  it; px read as Android dp), but the look is MMW's own: the icons are drawn
+  for MMW and the palette (CSS variables at the top of `app.css`, the pie
+  colours in `app.js`) is MMW's, not sampled from the app. Keep it that way.
+- It writes through `/api/app/` with the `X-CSRF-Token` header from its
+  `app-config` JSON, and only sends the fields that changed on an edit.

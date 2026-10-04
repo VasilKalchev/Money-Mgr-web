@@ -315,7 +315,7 @@ def test_delete_needs_csrf(client):
 def test_first_write_takes_one_backup(client):
     store = dbstore.store_for("alice")
     assert store.backup_count() == 0
-    client.get("/transactions")  # reads don't back up
+    client.get("/editor/transactions")  # reads don't back up
     assert store.backup_count() == 0
     patch(client, "/api/transactions/t1", field="ZCONTENT", value="a")
     patch(client, "/api/transactions/t1", field="ZCONTENT", value="b")

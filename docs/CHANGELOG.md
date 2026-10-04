@@ -5,6 +5,25 @@ Notable changes to Money Mgr web. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A new app at `/`, laid out like Money Manager on the phone and
+  installable as a PWA: transactions by day, calendar and month with
+  income, expense and total, and the month's budgets; adding, editing,
+  copying and deleting transactions with the app's account grid, category
+  picker, amount pad (in any currency) and note suggestions, and transfers
+  with a fee; bookmarks; search with filters; stats per category with a pie
+  chart and each category's trend, by week, month, year or any period;
+  accounts with their balances, a balance chart and each account's
+  statement, and modifying an account's balance; adding, renaming,
+  reordering, hiding and deleting accounts and categories. The previous
+  pages stay as the editor, under More.
+
+### Changed
+
+- The previous pages (transactions, accounts, categories) moved under
+  `/editor/`; their old addresses redirect there.
+
 ## [1.2.0] - 2026-10-04
 
 ### Added

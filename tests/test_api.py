@@ -98,7 +98,7 @@ def test_wrong_secret_for_a_real_token_id_is_401(api):
 def test_token_only_works_on_v1(api):
     r = api.c.get("/api/transactions/uids", headers={"Authorization": f"Bearer {api.token}"})
     assert r.status_code == 401
-    r = api.c.get("/transactions", headers={"Authorization": f"Bearer {api.token}"})
+    r = api.c.get("/editor/transactions", headers={"Authorization": f"Bearer {api.token}"})
     assert r.status_code == 302 and "/login" in r.headers["Location"]
 
 

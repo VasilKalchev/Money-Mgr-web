@@ -13,11 +13,13 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from flask import Flask, abort, flash, g, jsonify, redirect, render_template, request, send_file, session, url_for
+from werkzeug.datastructures import MultiDict
 
 import dbstore
 import dbsync
 import edits
 import gdrive
+import reads
 import users
 from dbstore import UnsupportedDatabase, check_db_supported
 
@@ -105,10 +107,12 @@ def get_db(readonly=True):
     return con
 
 
-def query(sql, params=(), readonly=True):
-    con = get_db(readonly=readonly)
+@contextmanager
+def read_db():
+    """A read-only connection for a request's reads (see reads.py)."""
+    con = get_db()
     try:
-        return con.execute(sql, params).fetchall()
+        yield con
     finally:
         con.close()
 
@@ -132,124 +136,6 @@ def write_db():
         con.commit()
     finally:
         con.close()
-
-
-# ---------------------------------------------------------------------------
-# Shared lookups
-# ---------------------------------------------------------------------------
-
-def get_accounts():
-    return query("""
-        SELECT a.uid, a.NIC_NAME, a.currencyUid, c.ISO, g.ACC_GROUP_NAME
-        FROM ASSETS a
-        LEFT JOIN CURRENCY c ON c.uid = a.currencyUid
-        LEFT JOIN ASSETGROUP g ON g.uid = a.groupUid
-        ORDER BY g.ORDERSEQ, a.ORDERSEQ, a.NIC_NAME
-    """)
-
-
-def get_accounts_grouped():
-    """[(group_name, [account_row, ...]), ...] in ASSETGROUP/ASSETS.ORDERSEQ order."""
-    rows = get_accounts()
-    return [(k, list(g)) for k, g in itertools.groupby(rows, key=lambda r: r["ACC_GROUP_NAME"])]
-
-
-def get_accounts_json():
-    return [dict(a) for a in get_accounts()]
-
-
-def get_asset_groups():
-    return query("SELECT uid, ACC_GROUP_NAME FROM ASSETGROUP ORDER BY ORDERSEQ")
-
-
-def get_transaction_years():
-    rows = query("SELECT DISTINCT substr(WDATE, 1, 4) AS y FROM INOUTCOME WHERE WDATE IS NOT NULL AND WDATE <> '' ORDER BY y")
-    return [r["y"] for r in rows]
-
-
-def get_currencies():
-    return query("""
-        SELECT DISTINCT cu.uid, cu.ISO
-        FROM INOUTCOME i
-        JOIN CURRENCY cu ON cu.uid = i.currencyUid
-        ORDER BY cu.ISO
-    """)
-
-
-def get_categories(type_filter=None):
-    sql = """
-        SELECT c.uid, c.NAME, c.TYPE, c.STATUS, c.pUid, c.ORDERSEQ, c.C_IS_DEL, p.NAME AS parent_name
-        FROM ZCATEGORY c
-        LEFT JOIN ZCATEGORY p ON p.uid = c.pUid AND p.TYPE = c.TYPE
-        WHERE IFNULL(NULLIF(c.C_IS_DEL, ''), 0) + 0 <> 1
-    """
-    params = ()
-    if type_filter is not None:
-        sql += " AND c.TYPE = ?"
-        params = (type_filter,)
-    sql += " ORDER BY c.TYPE DESC, c.STATUS, c.ORDERSEQ"
-    return query(sql, params)
-
-
-def build_category_tree(type_filter):
-    """[{uid, name, children:[{uid,name}]}] for one tree (0=income, 1=expense)."""
-    rows = get_categories(type_filter=type_filter)
-    roots = [r for r in rows if r["STATUS"] == 0]
-    children = [r for r in rows if r["STATUS"] == 2]
-    tree = []
-    for r in roots:
-        kids = [{"uid": c["uid"], "name": c["NAME"]} for c in children if c["pUid"] == r["uid"]]
-        tree.append({"uid": r["uid"], "name": r["NAME"], "children": kids})
-    return tree
-
-
-def category_lookup(type_filter):
-    """{uid: {name, status, parent_uid}} for one tree."""
-    rows = get_categories(type_filter=type_filter)
-    return {r["uid"]: {"name": r["NAME"], "status": r["STATUS"], "parent_uid": r["pUid"]} for r in rows}
-
-
-def category_path(lookup, uid):
-    """(root uid, "Root > Child" or "Root") for a category in a
-    category_lookup() tree, or ("", "") if it isn't there."""
-    cat = lookup.get(uid)
-    if not cat:
-        return "", ""
-    if cat["status"] == 0:
-        return uid, cat["name"]
-    root_uid = cat["parent_uid"]
-    return root_uid, f'{lookup.get(root_uid, {}).get("name", "")} > {cat["name"]}'
-
-
-def escape_like(s):
-    """Escape %, _ and \\ so a value can be embedded in a LIKE pattern literally."""
-    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-def get_distinct_values(column, limit=1000):
-    """Distinct non-empty values of a column, most-recently-used first, for
-    autocomplete suggestions on free-text inputs (note/description)."""
-    rows = query(
-        f"""
-        SELECT {column} AS v FROM INOUTCOME
-        WHERE IFNULL({column}, '') <> ''
-        GROUP BY {column}
-        ORDER BY MAX(CAST(UTIME AS INTEGER)) DESC
-        LIMIT ?
-        """,
-        (limit,),
-    )
-    return [r["v"] for r in rows]
-
-
-def text_search_clause(column, raw):
-    """Build a LIKE/NOT LIKE clause for a free-text search box. A leading '!'
-    negates the match (e.g. '!foo' = does not contain 'foo')."""
-    negate = raw.startswith("!")
-    term = raw[1:] if negate else raw
-    op = "NOT LIKE" if negate else "LIKE"
-    clause = f"IFNULL({column}, '') {op} ? ESCAPE '\\'"
-    return clause, f"%{escape_like(term)}%"
 
 
 # ---------------------------------------------------------------------------
@@ -626,7 +512,7 @@ def user_action(name, action):
 # ---------------------------------------------------------------------------
 
 _NO_DB_EXEMPT_ENDPOINTS = {
-    "static", "index", "api_db_status", "settings", "backup_settings", "setup", "upload_db", "sync_db",
+    "static", "api_db_status", "settings", "backup_settings", "setup", "upload_db", "sync_db",
     "sync_upload", "sync_cancel", "gdrive_setup", "gdrive_callback", "gdrive_paste", "gdrive_disconnect",
     "login", "first_account", "logout", "change_password", "users_page", "user_action", "healthz",
     "manifest", "service_worker", "create_api_token", "revoke_api_token", "v1_status",
@@ -659,7 +545,8 @@ def api_db_status():
 
 @app.route("/")
 def index():
-    return redirect(url_for("transactions"))
+    """The app: one page whose screens get their data from /api/app/."""
+    return render_template("app.html")
 
 
 # ---------------------------------------------------------------------------
@@ -692,7 +579,7 @@ def upload_db():
         flash(f"{os.path.basename(f.filename)} was not installed: {e}", "error")
         return redirect(url_for("setup" if first_run else "settings"))
     flash(f"Installed {os.path.basename(f.filename)}.", "ok")
-    return redirect(url_for("transactions" if first_run else "settings"))
+    return redirect(url_for("index" if first_run else "settings"))
 
 
 # Where Google sends the browser after consent when this app isn't being
@@ -779,7 +666,7 @@ def _finish_gdrive_auth(code, state):
     flash("Connected to Google Drive.", "ok")
     if first_run:
         _sync_and_flash()
-    return redirect(url_for("transactions" if first_run and current_store().db_exists() else "settings"))
+    return redirect(url_for("index" if first_run and current_store().db_exists() else "settings"))
 
 
 @app.route("/setup/gdrive/callback")
@@ -982,217 +869,53 @@ def backup_now():
     return redirect(url_for("settings"))
 
 
-def parse_transaction_filters(args):
-    """Parse the /transactions query-string filters into (a) the raw values
-    the template needs to re-render the filter bar and (b) a `build_where`
-    closure that both the page route and the "select all matching rows" API
-    reuse to build the same WHERE clause."""
-    account_uids = [v for v in args.getlist("account") if v]
-    category_uids = [v for v in args.getlist("category") if v]
-    # Root categories selected on their own, without their children.
-    category_only_uids = [v for v in args.getlist("category_only") if v]
-    do_types = [v for v in args.getlist("type") if v]
-    date_from = args.get("from", "")
-    date_to = args.get("to", "")
-    q_note = args.get("q_note", "")
-    q_desc = args.get("q_desc", "")
-    has_note = args.get("has_note", "")  # "", "yes", "no"
-    has_desc = args.get("has_desc", "")
-    amount_min = args.get("amount_min", "")
-    amount_max = args.get("amount_max", "")
-    entered_currency = args.get("entered_currency", "")
-    show_deleted = args.get("show_deleted", "hide")
-    if show_deleted not in ("hide", "show", "only"):
-        show_deleted = "hide"
-    show_mirror = args.get("show_mirror", "hide")
-    if show_mirror not in ("hide", "show", "only"):
-        show_mirror = "hide"
-
-    # A selected root category also pulls in all of its children, in either tree.
-    expanded_category_uids = set(category_uids) | set(category_only_uids)
-    for uid in category_uids:
-        for t in (0, 1):
-            for r in build_category_tree(t):
-                if r["uid"] == uid:
-                    expanded_category_uids.update(c["uid"] for c in r["children"])
-
-    # Named filter clauses, so per-facet counts below can recompute with any
-    # one of them left out (e.g. "how many deleted rows match everything
-    # else?").
-    filter_specs = []  # [(name, sql_clause, params)]
-
-    if account_uids:
-        placeholders = ",".join("?" for _ in account_uids)
-        filter_specs.append(("account", f"i.assetUid IN ({placeholders})", list(account_uids)))
-    if expanded_category_uids:
-        placeholders = ",".join("?" for _ in expanded_category_uids)
-        filter_specs.append(("category", f"i.ctgUid IN ({placeholders})", list(expanded_category_uids)))
-    if do_types:
-        placeholders = ",".join("?" for _ in do_types)
-        filter_specs.append(("type", f"i.DO_TYPE IN ({placeholders})", list(do_types)))
-    if date_from:
-        filter_specs.append(("date_from", "i.WDATE >= ?", [date_from]))
-    if date_to:
-        filter_specs.append(("date_to", "i.WDATE <= ?", [date_to]))
-    if q_note:
-        clause, param = text_search_clause("i.ZCONTENT", q_note)
-        filter_specs.append(("q_note", clause, [param]))
-    if q_desc:
-        clause, param = text_search_clause("i.ZDATA", q_desc)
-        filter_specs.append(("q_desc", clause, [param]))
-    if has_note == "yes":
-        filter_specs.append(("has_note", "IFNULL(i.ZCONTENT, '') <> ''", []))
-    elif has_note == "no":
-        filter_specs.append(("has_note", "IFNULL(i.ZCONTENT, '') = ''", []))
-    if has_desc == "yes":
-        filter_specs.append(("has_desc", "IFNULL(i.ZDATA, '') <> ''", []))
-    elif has_desc == "no":
-        filter_specs.append(("has_desc", "IFNULL(i.ZDATA, '') = ''", []))
-    if amount_min:
-        try:
-            filter_specs.append(("amount_min", "i.AMOUNT_ACCOUNT >= ?", [float(amount_min)]))
-        except ValueError:
-            amount_min = ""
-    if amount_max:
-        try:
-            filter_specs.append(("amount_max", "i.AMOUNT_ACCOUNT <= ?", [float(amount_max)]))
-        except ValueError:
-            amount_max = ""
-    if entered_currency:
-        filter_specs.append(("entered_currency", "i.currencyUid = ?", [entered_currency]))
-
-    def build_where(exclude=None):
-        clauses = []
-        p = []
-        if exclude != "show_deleted":
-            if show_deleted == "hide":
-                clauses.append("i.IS_DEL = 0")
-            elif show_deleted == "only":
-                clauses.append("i.IS_DEL <> 0")
-        if exclude != "show_mirror":
-            if show_mirror == "hide":
-                clauses.append("i.DO_TYPE <> '4'")
-            elif show_mirror == "only":
-                clauses.append("i.DO_TYPE = '4'")
-        for name, clause, cparams in filter_specs:
-            if name == exclude:
-                continue
-            clauses.append(clause)
-            p.extend(cparams)
-        return (" AND ".join(clauses) if clauses else "1=1"), p
-
-    return {
-        "account_uids": account_uids, "category_uids": category_uids,
-        "category_only_uids": category_only_uids, "do_types": do_types,
-        "date_from": date_from, "date_to": date_to, "q_note": q_note, "q_desc": q_desc,
-        "has_note": has_note, "has_desc": has_desc, "amount_min": amount_min, "amount_max": amount_max,
-        "entered_currency": entered_currency, "show_deleted": show_deleted, "show_mirror": show_mirror,
-        "build_where": build_where,
-    }
-
-
 @app.route("/api/transactions/uids")
 def api_transaction_uids():
-    """All INOUTCOME.uid values matching the current /transactions filters,
+    """All INOUTCOME.uid values matching the current /editor/transactions filters,
     across every page -- used by "select all matching rows" in the bulk
     editor, as opposed to just the rows rendered on the current page."""
-    f = parse_transaction_filters(request.args)
-    where, params = f["build_where"]()
-    rows = query(f"SELECT i.uid FROM INOUTCOME i WHERE {where}", params)
-    return jsonify(uids=[r["uid"] for r in rows])
+    with read_db() as con:
+        uids = reads.matching_uids(con, reads.parse_transaction_filters(con, request.args))
+    return jsonify(uids=uids)
 
 
 @app.route("/api/transactions/group-stats")
 def api_transaction_group_stats():
     """Grouping stats (same-account rows within N seconds of each other)
-    over every matching transaction, not just whatever page is loaded --
-    the point of grouping is the stats, so this computes them directly in
-    SQL/Python rather than requiring the client to fetch and render however
-    many thousand rows actually match."""
-    f = parse_transaction_filters(request.args)
-    where, params = f["build_where"]()
+    over every matching transaction, not just whatever page is loaded."""
     try:
-        threshold_ms = max(1, int(request.args.get("seconds", 60))) * 1000
+        seconds = max(1, int(request.args.get("seconds", 60)))
     except ValueError:
-        threshold_ms = 60000
-
-    rows = query(
-        f"""
-        SELECT i.assetUid AS account, CAST(i.ZDATE AS INTEGER) AS t
-        FROM INOUTCOME i WHERE {where}
-        ORDER BY t ASC
-        """,
-        params,
-    )
-
-    group_count = 0
-    group_sizes = []
-    gaps_ms = []
-    prev_account = None
-    prev_t = None
-    cur_size = 0
-    for r in rows:
-        account, t = r["account"], r["t"]
-        same_cluster = prev_account is not None and account == prev_account and abs(prev_t - t) <= threshold_ms
-        if not same_cluster:
-            if group_count > 0:
-                group_sizes.append(cur_size)
-            group_count += 1
-            cur_size = 0
-        else:
-            gaps_ms.append(abs(t - prev_t))
-        cur_size += 1
-        prev_account, prev_t = account, t
-    if group_count > 0:
-        group_sizes.append(cur_size)
-
-    total = len(rows)
-    multi_groups = sum(1 for g in group_sizes if g > 1)
-    avg_size = total / group_count if group_count else 0
-    avg_gap_sec = (sum(gaps_ms) / len(gaps_ms) / 1000) if gaps_ms else 0
-    median_gap_sec = 0
-    if gaps_ms:
-        s = sorted(gaps_ms)
-        mid = len(s) // 2
-        median_ms = s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
-        median_gap_sec = median_ms / 1000
-
-    return jsonify(
-        total_rows=total, groups=group_count, multi_groups=multi_groups,
-        avg_size=avg_size, avg_gap_sec=avg_gap_sec, median_gap_sec=median_gap_sec,
-    )
+        seconds = 60
+    with read_db() as con:
+        stats = reads.group_stats(con, reads.parse_transaction_filters(con, request.args), seconds)
+    return jsonify(**stats)
 
 
-TX_SORT_OPTIONS = {
-    "date": "i.WDATE {dir}, CAST(i.ZDATE AS INTEGER) {dir}",
-    "amount": "i.AMOUNT_ACCOUNT {dir}",
-    "entered_amount": "i.IN_ZMONEY {dir}",
-    "account": "a.NIC_NAME COLLATE NOCASE {dir}",
-    "updated": "i.UTIME {dir}",
-}
+@app.route("/editor")
+def editor():
+    return redirect(url_for("transactions"))
 
 
+# The editor's pages were at the top level until the app took /.
 @app.route("/transactions")
+@app.route("/accounts")
+@app.route("/categories")
+def old_editor_page():
+    query = request.query_string.decode()
+    return redirect(f"/editor{request.path}" + (f"?{query}" if query else ""), 301)
+
+
+def group_accounts(rows):
+    """[(group name, [row, ...]), ...] for account rows, which arrive in the
+    app's group order (ASSETGROUP.ORDERSEQ). A plain consecutive grouping
+    keeps that order, unlike Jinja's `groupby` filter, which would silently
+    re-sort groups alphabetically."""
+    return [(k, list(g)) for k, g in itertools.groupby(rows, key=lambda r: r["ACC_GROUP_NAME"])]
+
+
+@app.route("/editor/transactions")
 def transactions():
-    f = parse_transaction_filters(request.args)
-    account_uids = f["account_uids"]
-    category_uids = f["category_uids"]
-    do_types = f["do_types"]
-    date_from = f["date_from"]
-    date_to = f["date_to"]
-    q_note = f["q_note"]
-    q_desc = f["q_desc"]
-    has_note = f["has_note"]
-    has_desc = f["has_desc"]
-    amount_min = f["amount_min"]
-    amount_max = f["amount_max"]
-    entered_currency = f["entered_currency"]
-    show_deleted = f["show_deleted"]
-    show_mirror = f["show_mirror"]
-    build_where = f["build_where"]
-
-    where, params = build_where()
-
     page_size_options = [25, 50, 100, 250, 500, 1000]
     try:
         page_size = int(request.args.get("page_size", 100))
@@ -1204,130 +927,61 @@ def transactions():
         page = max(1, int(request.args.get("page", 1)))
     except ValueError:
         page = 1
-
-    total_rows = query(f"SELECT COUNT(*) AS n FROM INOUTCOME i WHERE {where}", params)[0]["n"]
-    total_pages = max(1, (total_rows + page_size - 1) // page_size)
-    page = min(page, total_pages)
-    offset = (page - 1) * page_size
-
-    # Facet counts: each is computed with every filter EXCEPT the one that
-    # facet itself controls, so a checkbox/select can show "how many rows
-    # would this option add or remove" rather than just the current total.
-    deleted_where, deleted_params = build_where(exclude="show_deleted")
-    deleted_count = query(
-        f"SELECT COUNT(*) AS n FROM INOUTCOME i WHERE ({deleted_where}) AND i.IS_DEL <> 0", deleted_params
-    )[0]["n"]
-    mirror_where, mirror_params = build_where(exclude="show_mirror")
-    mirror_count = query(
-        f"SELECT COUNT(*) AS n FROM INOUTCOME i WHERE ({mirror_where}) AND i.DO_TYPE = '4'", mirror_params
-    )[0]["n"]
-
-    note_where, note_params = build_where(exclude="has_note")
-    note_counts = {
-        "yes": query(f"SELECT COUNT(*) AS n FROM INOUTCOME i WHERE ({note_where}) AND IFNULL(i.ZCONTENT,'')<>''", note_params)[0]["n"],
-        "no": query(f"SELECT COUNT(*) AS n FROM INOUTCOME i WHERE ({note_where}) AND IFNULL(i.ZCONTENT,'')=''", note_params)[0]["n"],
-    }
-    desc_where, desc_params = build_where(exclude="has_desc")
-    desc_counts = {
-        "yes": query(f"SELECT COUNT(*) AS n FROM INOUTCOME i WHERE ({desc_where}) AND IFNULL(i.ZDATA,'')<>''", desc_params)[0]["n"],
-        "no": query(f"SELECT COUNT(*) AS n FROM INOUTCOME i WHERE ({desc_where}) AND IFNULL(i.ZDATA,'')=''", desc_params)[0]["n"],
-    }
-
-    account_where, account_params = build_where(exclude="account")
-    account_counts = {
-        r["uid"]: r["n"] for r in query(
-            f"SELECT i.assetUid AS uid, COUNT(*) AS n FROM INOUTCOME i WHERE {account_where} GROUP BY i.assetUid",
-            account_params,
-        )
-    }
-
-    category_where, category_params = build_where(exclude="category")
-    category_counts_raw = {
-        r["uid"]: r["n"] for r in query(
-            f"SELECT i.ctgUid AS uid, COUNT(*) AS n FROM INOUTCOME i WHERE {category_where} GROUP BY i.ctgUid",
-            category_params,
-        )
-    }
-    # A root category's displayed count includes all of its children's rows;
-    # the raw per-uid counts are also passed for the "root only" filter state.
-    category_counts = dict(category_counts_raw)
-    for t in (0, 1):
-        for r in build_category_tree(t):
-            child_total = sum(category_counts_raw.get(c["uid"], 0) for c in r["children"])
-            category_counts[r["uid"]] = category_counts_raw.get(r["uid"], 0) + child_total
-
-    type_where, type_params = build_where(exclude="type")
-    type_counts = {
-        r["t"]: r["n"] for r in query(
-            f"SELECT i.DO_TYPE AS t, COUNT(*) AS n FROM INOUTCOME i WHERE {type_where} GROUP BY i.DO_TYPE",
-            type_params,
-        )
-    }
-
     sort_by = request.args.get("sort", "date")
-    if sort_by not in TX_SORT_OPTIONS:
+    if sort_by not in reads.TX_SORT_OPTIONS:
         sort_by = "date"
     sort_dir = request.args.get("dir", "desc")
     if sort_dir not in ("asc", "desc"):
         sort_dir = "desc"
-    order_by = TX_SORT_OPTIONS[sort_by].format(dir=sort_dir)
 
-    sql = f"""
-        SELECT i.uid, i.WDATE, i.ZDATE AS zdate_ms, i.IS_DEL AS is_del,
-               time(CAST(i.ZDATE AS INTEGER) / 1000, 'unixepoch', 'localtime') AS tx_time,
-               i.AMOUNT_ACCOUNT, i.DO_TYPE, i.ZCONTENT, i.ZDATA, i.currencyUid AS tx_currency_uid,
-               i.IN_ZMONEY AS entered_amount,
-               datetime(CAST(i.UTIME AS INTEGER) / 1000, 'unixepoch', 'localtime') AS updated_str,
-               cu.ISO AS currency_iso,
-               acu.ISO AS account_currency_iso,
-               a.uid AS account_uid, a.NIC_NAME AS account_name,
-               ta.NIC_NAME AS to_account_name,
-               i.ctgUid AS category_uid
-        FROM INOUTCOME i
-        LEFT JOIN ASSETS a    ON a.uid = i.assetUid
-        LEFT JOIN ASSETS ta   ON ta.uid = i.toAssetUid
-        LEFT JOIN CURRENCY cu ON cu.uid = i.currencyUid
-        LEFT JOIN CURRENCY acu ON acu.uid = a.currencyUid
-        WHERE {where}
-        ORDER BY {order_by}
-        LIMIT ? OFFSET ?
-    """
-    rows = query(sql, params + [page_size, offset])
-
-    lookups = {0: category_lookup(0), 1: category_lookup(1)}
+    with read_db() as con:
+        f = reads.parse_transaction_filters(con, request.args)
+        total_rows = reads.count_transactions(con, f)
+        total_pages = max(1, (total_rows + page_size - 1) // page_size)
+        page = min(page, total_pages)
+        rows = reads.list_transactions(con, f, sort_by, sort_dir, page_size, (page - 1) * page_size)
+        facets = reads.transaction_facets(con, f)
+        lookups = reads.category_lookups(con)
+        category_trees = {0: reads.build_category_tree(con, 0), 1: reads.build_category_tree(con, 1)}
+        accounts = reads.get_accounts(con)
+        currencies = reads.get_used_currencies(con)
+        tx_years = reads.get_transaction_years(con)
+        note_suggestions = reads.get_suggestions(con, "note")
+        desc_suggestions = reads.get_suggestions(con, "description")
 
     enriched = []
     for r in rows:
         d = dict(r)
         tree_type = 0 if d["DO_TYPE"] == "0" else 1
         d["tree_type"] = tree_type
-        d["root_uid"], d["category_path"] = category_path(lookups[tree_type], d["category_uid"])
+        d["root_uid"], d["category_path"] = reads.category_path(lookups[tree_type], d["ctgUid"])
         d["editable_category"] = d["DO_TYPE"] in ("0", "1")
         enriched.append(d)
 
     return render_template(
         "transactions.html",
         rows=enriched,
-        accounts=get_accounts(),
-        accounts_grouped=get_accounts_grouped(),
-        accounts_json=get_accounts_json(),
-        category_trees={0: build_category_tree(0), 1: build_category_tree(1)},
-        currencies=get_currencies(),
-        tx_years=get_transaction_years(),
-        filters=dict(account=account_uids, category=category_uids, category_only=f["category_only_uids"],
-                     type=do_types, date_from=date_from, date_to=date_to,
-                     q_note=q_note, q_desc=q_desc,
-                     has_note=has_note, has_desc=has_desc, amount_min=amount_min, amount_max=amount_max,
-                     entered_currency=entered_currency,
-                     show_deleted=show_deleted, show_mirror=show_mirror,
+        accounts=accounts,
+        accounts_grouped=group_accounts(accounts),
+        accounts_json=[dict(a) for a in accounts],
+        category_trees=category_trees,
+        currencies=currencies,
+        tx_years=tx_years,
+        filters=dict(account=f["account_uids"], category=f["category_uids"], category_only=f["category_only_uids"],
+                     type=f["do_types"], date_from=f["date_from"], date_to=f["date_to"],
+                     q_note=f["q_note"], q_desc=f["q_desc"],
+                     has_note=f["has_note"], has_desc=f["has_desc"],
+                     amount_min=f["amount_min"], amount_max=f["amount_max"],
+                     entered_currency=f["entered_currency"],
+                     show_deleted=f["show_deleted"], show_mirror=f["show_mirror"],
                      sort=sort_by, dir=sort_dir),
-        note_suggestions=get_distinct_values("ZCONTENT"),
-        desc_suggestions=get_distinct_values("ZDATA"),
-        deleted_count=deleted_count, mirror_count=mirror_count,
-        note_counts=note_counts, desc_counts=desc_counts,
-        account_counts=account_counts, category_counts=category_counts,
-        category_counts_own=category_counts_raw, type_counts=type_counts,
-        sort_options=list(TX_SORT_OPTIONS),
+        note_suggestions=note_suggestions,
+        desc_suggestions=desc_suggestions,
+        deleted_count=facets["deleted"], mirror_count=facets["mirror"],
+        note_counts=facets["note"], desc_counts=facets["description"],
+        account_counts=facets["account"], category_counts=facets["category"],
+        category_counts_own=facets["category_own"], type_counts=facets["type"],
+        sort_options=list(reads.TX_SORT_OPTIONS),
         page=page,
         total_pages=total_pages,
         total_rows=total_rows,
@@ -1336,57 +990,20 @@ def transactions():
     )
 
 
-def get_account_rows():
-    """Every account with its group, currency, live-row count and balance,
-    in the app's group/account order."""
-    return query("""
-        SELECT a.uid, a.NIC_NAME, c.ISO, g.uid AS group_uid, g.ACC_GROUP_NAME,
-               a.ORDERSEQ, a.TYPE AS account_type, a.ZDATA AS account_flags,
-               a.CARD_ACCOUNT_NAME,
-               datetime(CAST(a.A_UTIME AS INTEGER) / 1000, 'unixepoch', 'localtime') AS updated_str,
-               COUNT(i.uid) AS tx_count,
-               ROUND(SUM(CASE i.DO_TYPE
-                   WHEN '0' THEN i.AMOUNT_ACCOUNT
-                   WHEN '7' THEN i.AMOUNT_ACCOUNT
-                   WHEN '4' THEN i.AMOUNT_ACCOUNT
-                   ELSE -i.AMOUNT_ACCOUNT END), 2) AS balance
-        FROM ASSETS a
-        LEFT JOIN CURRENCY c ON c.uid = a.currencyUid
-        LEFT JOIN ASSETGROUP g ON g.uid = a.groupUid
-        LEFT JOIN INOUTCOME i ON i.assetUid = a.uid AND i.IS_DEL = 0
-        GROUP BY a.uid
-        ORDER BY g.ORDERSEQ, a.ORDERSEQ, a.NIC_NAME
-    """)
-
-
-@app.route("/accounts")
+@app.route("/editor/accounts")
 def accounts():
-    rows = get_account_rows()
-    # Rows already arrive in group order (from ASSETGROUP.ORDERSEQ), so a
-    # plain consecutive grouping preserves that -- unlike Jinja's `groupby`
-    # filter, which would silently re-sort groups alphabetically.
-    grouped = [(k, list(g)) for k, g in itertools.groupby(rows, key=lambda r: r["ACC_GROUP_NAME"])]
-    return render_template("accounts.html", grouped_rows=grouped, groups=get_asset_groups())
+    with read_db() as con:
+        rows = reads.get_account_rows(con)
+        groups = reads.get_asset_groups(con)
+    return render_template("accounts.html", grouped_rows=group_accounts(rows), groups=groups)
 
 
-@app.route("/categories")
+@app.route("/editor/categories")
 def categories():
-    income = get_categories(type_filter=0)
-    expense = get_categories(type_filter=1)
-
-    totals_sql = """
-        SELECT c.uid, acu.ISO AS currency_iso,
-               ROUND(SUM(i.AMOUNT_ACCOUNT), 2) AS total, COUNT(i.uid) AS rows
-        FROM ZCATEGORY c
-        JOIN INOUTCOME i ON i.ctgUid = c.uid AND i.IS_DEL = 0
-        LEFT JOIN ASSETS a ON a.uid = i.assetUid
-        LEFT JOIN CURRENCY acu ON acu.uid = a.currencyUid
-        GROUP BY c.uid, acu.ISO
-        ORDER BY acu.ISO
-    """
-    totals = {}
-    for r in query(totals_sql):
-        totals.setdefault(r["uid"], []).append((r["currency_iso"] or "?", r["total"], r["rows"]))
+    with read_db() as con:
+        income = reads.get_categories(con, 0)
+        expense = reads.get_categories(con, 1)
+        totals = reads.get_category_totals(con)
 
     def build_tree(rows):
         roots = [r for r in rows if r["STATUS"] == 0]
@@ -1503,6 +1120,505 @@ def api_edit_category(uid, type_):
 
 
 # ---------------------------------------------------------------------------
+# Routes - the app's JSON (/api/app/)
+# ---------------------------------------------------------------------------
+
+# Private like the editor's /api/ helpers: shaped for the app's screens
+# (templates/app.html, static/app/) and free to change with them.
+
+def _app_currencies(con):
+    """({uid: {iso, symbol, decimals, rate}}, the main currency's uid)."""
+    out, main = {}, None
+    for r in reads.get_currencies(con):
+        decimals = _num_or_none(r["DECIMAL_POINT"], int)
+        out[r["uid"]] = {"iso": r["ISO"], "symbol": r["SYMBOL"] or r["ISO"], "order": _num_or_none(r["ORDER_SEQ"], int),
+                         "decimals": 2 if decimals is None else decimals, "rate": _num_or_none(r["RATE"]) or 1.0}
+        if str(r["IS_MAIN_CURRENCY"]) == "1":
+            main = r["uid"]
+    return out, main or next((u for u, c in out.items() if c["rate"] == 1.0), None)
+
+
+def _in_main(r, currencies, decimals):
+    """A reads._TX_SELECT row's amount in the main currency, rounded to its
+    decimals, as the app adds up income and expense (see reads.sums())."""
+    rate = currencies.get(r["account_currency_uid"], {}).get("rate", 1.0)
+    return round((_num_or_none(r["AMOUNT_ACCOUNT"]) or 0.0) * rate, decimals)
+
+
+def _category_names(lookup, uid):
+    """(root's name, child's name or "") of a category in a
+    reads.category_lookup() tree; ("", "") if it isn't there."""
+    cat = lookup.get(uid)
+    if not cat:
+        return "", ""
+    if cat["status"] == 0:
+        return cat["name"], ""
+    return lookup.get(cat["parent_uid"], {}).get("name", ""), cat["name"]
+
+
+def _app_row(r, lookups, currencies):
+    """A reads._TX_SELECT row as the app's lists show it: the amount as
+    entered, in the currency it was entered in."""
+    category, subcategory = _category_names(lookups[0 if r["DO_TYPE"] == "0" else 1], r["ctgUid"])
+    amount, currency = _num_or_none(r["IN_ZMONEY"]), r["currency_uid"]
+    if amount is None or currency not in currencies:
+        amount, currency = _num_or_none(r["AMOUNT_ACCOUNT"]) or 0.0, r["account_currency_uid"]
+    return {
+        "uid": r["uid"], "type": r["DO_TYPE"], "date": r["WDATE"], "time": (r["tx_time"] or "")[:5],
+        "amount": amount, "currency": currency, "category": category, "subcategory": subcategory,
+        "account": r["account_name"] or "", "to_account": r["to_account_name"] or "",
+        "note": r["ZCONTENT"] or "", "description": r["ZDATA"] or "",
+    }
+
+
+@app.route("/api/app/meta")
+def app_meta():
+    """What the app's screens look things up in: the currencies, the
+    accounts (status: edits.ACCOUNT_STATUSES; hidden: deleted or hidden in
+    the app, left out of pickers), the account groups, both category trees
+    and the app's week_start (0 Sunday .. 6 Saturday)."""
+    with read_db() as con:
+        currencies, main = _app_currencies(con)
+        accounts = reads.get_accounts(con)
+        groups = reads.get_asset_groups(con)
+        income, expense = reads.build_category_tree(con, 0), reads.build_category_tree(con, 1)
+        settings = reads.get_settings(con)
+    week_start = _num_or_none(settings.get("week_start_day"), int)
+    return jsonify(ok=True, currencies=currencies, main_currency=main, categories={"income": income, "expense": expense},
+                   week_start=week_start if week_start in range(7) else 1,
+                   groups=[{"uid": g["uid"], "name": g["ACC_GROUP_NAME"] or ""} for g in groups],
+                   accounts=[{"uid": a["uid"], "name": a["NIC_NAME"], "group": a["ACC_GROUP_NAME"] or "",
+                              "group_uid": a["group_uid"], "currency": a["currencyUid"],
+                              "status": str(a["account_flags"] or "0"),
+                              "hidden": str(a["account_flags"]) in ("1", "3")}
+                             for a in accounts])
+
+
+@app.route("/api/app/days")
+def app_days():
+    """The transactions dated from..to (YYYY-MM-DD; the other /editor/transactions
+    filters apply too), newest first and grouped by day, each day with its
+    income and expense in the main currency. Balance adjustments count in
+    neither, as in the app's own statistics."""
+    for name in ("from", "to"):
+        try:
+            datetime.strptime(request.args.get(name, ""), "%Y-%m-%d")
+        except ValueError:
+            raise ApiError(f"{name} must be a date (YYYY-MM-DD)")
+    with read_db() as con:
+        currencies, main = _app_currencies(con)
+        lookups = reads.category_lookups(con)
+        rows = reads.list_transactions(con, reads.parse_transaction_filters(con, request.args), limit=None)
+    decimals = currencies.get(main, {}).get("decimals", 2)
+    days = []
+    for r in rows:
+        if not days or days[-1]["date"] != r["WDATE"]:
+            days.append({"date": r["WDATE"], "income": 0.0, "expense": 0.0, "rows": []})
+        day = days[-1]
+        if r["DO_TYPE"] in ("0", "1"):
+            day["income" if r["DO_TYPE"] == "0" else "expense"] += _in_main(r, currencies, decimals)
+        day["rows"].append(_app_row(r, lookups, currencies))
+    # Not rounded to the currency's decimals, see app_sums().
+    for day in days:
+        day["income"], day["expense"] = round(day["income"], 6), round(day["expense"], 6)
+    return jsonify(ok=True, days=days)
+
+
+def _app_filters(con, **extra):
+    """The /editor/transactions filters in the request, with extra ones on top."""
+    args = MultiDict(request.args)
+    for k, v in extra.items():
+        args.setlist(k, v if isinstance(v, list) else [v])
+    return reads.parse_transaction_filters(con, args)
+
+
+def _check_dates(*names):
+    for name in names:
+        try:
+            datetime.strptime(request.args.get(name, ""), "%Y-%m-%d")
+        except ValueError:
+            raise ApiError(f"{name} must be a date (YYYY-MM-DD)")
+
+
+@app.route("/api/app/sums")
+def app_sums():
+    """Income and expense per day, from..to, in the main currency."""
+    _check_dates("from", "to")
+    with read_db() as con:
+        rows = reads.sums(con, _app_filters(con, type=["0", "1"]), "date")
+    days = {}
+    for r in rows:
+        days.setdefault(r["key"], [0.0, 0.0])[r["DO_TYPE"] == "1"] += r["in_main"] or 0.0
+    # Not rounded to the currency's decimals: restated amounts carry
+    # fractions of a cent, which would drift once a year of days is added up.
+    return jsonify(ok=True, days=[{"date": k, "income": round(v[0], 6), "expense": round(v[1], 6)}
+                                  for k, v in sorted(days.items())])
+
+
+@app.route("/api/app/stats")
+def app_stats():
+    """Income and expense, from..to, per category in the main currency:
+    each root with its total and its children's, largest first. A root's own
+    rows (not in a child) show as a child called Other, as in the app."""
+    _check_dates("from", "to")
+    with read_db() as con:
+        currencies, main = _app_currencies(con)
+        lookups = reads.category_lookups(con)
+        rows = reads.sums(con, _app_filters(con, type=["0", "1"]), "category")
+    decimals = currencies.get(main, {}).get("decimals", 2)
+    out = {}
+    for tree, name in ((0, "income"), (1, "expense")):
+        roots = {}
+        for r in rows:
+            if r["DO_TYPE"] != str(tree):
+                continue
+            amount = r["in_main"] or 0.0
+            cat = lookups[tree].get(r["key"])
+            root_uid = r["key"] if not cat or cat["status"] == 0 else cat["parent_uid"]
+            root = roots.setdefault(root_uid, {"uid": root_uid, "amount": 0.0, "children": {},
+                                               "name": lookups[tree].get(root_uid, {}).get("name", "")})
+            root["amount"] += amount
+            own = not cat or cat["status"] == 0
+            child = root["children"].setdefault(r["key"], {"uid": r["key"], "amount": 0.0,
+                                                           "name": "Other" if own else cat["name"]})
+            child["amount"] += amount
+        cats = sorted(roots.values(), key=lambda c: -c["amount"])
+        for c in cats:
+            c["amount"] = round(c["amount"], decimals)
+            c["children"] = sorted(({**k, "amount": round(k["amount"], decimals)} for k in c["children"].values()),
+                                   key=lambda k: -k["amount"])
+        out[name] = {"total": round(sum(c["amount"] for c in cats), decimals), "categories": cats}
+    return jsonify(ok=True, **out)
+
+
+# What a row does to its account's balance, by DO_TYPE: income, adjustments
+# up and a transfer's receiving leg add, the rest subtract.
+_BALANCE_SIGN = {"0": 1, "7": 1, "4": 1, "1": -1, "8": -1, "3": -1}
+
+
+@app.route("/api/app/accounts")
+def app_accounts():
+    """The accounts by group with their balances in their own currency, and
+    each group's and all accounts' totals in the main currency. Deleted
+    accounts are left out; hidden ones count in the totals but aren't listed."""
+    with read_db() as con:
+        currencies, main = _app_currencies(con)
+        rows = reads.get_account_rows(con)
+    decimals = currencies.get(main, {}).get("decimals", 2)
+    groups, assets, liabilities = [], 0.0, 0.0
+    for r in rows:
+        status = str(r["account_flags"])
+        if status == "1":
+            continue
+        balance = r["balance"] or 0.0
+        in_main = balance * currencies.get(r["currency_uid"], {}).get("rate", 1.0)
+        if in_main >= 0:
+            assets += in_main
+        else:
+            liabilities -= in_main
+        if not groups or groups[-1]["uid"] != r["group_uid"]:
+            groups.append({"uid": r["group_uid"], "name": r["ACC_GROUP_NAME"] or "", "total": 0.0, "accounts": []})
+        groups[-1]["total"] += in_main
+        if status != "3":
+            groups[-1]["accounts"].append({"uid": r["uid"], "name": r["NIC_NAME"], "balance": balance,
+                                           "currency": r["currency_uid"]})
+    for grp in groups:
+        grp["total"] = round(grp["total"], decimals)
+    return jsonify(ok=True, assets=round(assets, decimals), liabilities=round(liabilities, decimals), groups=groups)
+
+
+def _opening_balance(con, uid, before):
+    """An account's balance at the start of the day `before` (YYYY-MM-DD)."""
+    day_before = (datetime.strptime(before, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    f = reads.parse_transaction_filters(con, MultiDict([("account", uid), ("to", day_before), ("show_mirror", "show")]))
+    return sum(_BALANCE_SIGN.get(r["DO_TYPE"], 0) * (r["total"] or 0.0) for r in reads.sums(con, f, "account"))
+
+
+@app.route("/api/app/accounts/<uid>")
+def app_account(uid):
+    """One account from..to, in its own currency: its balance before from
+    and at the end, and its rows (a transfer's receiving leg too) by day,
+    newest first, each row with the balance after it. With sums=1, only
+    each day's deposits and withdrawals."""
+    _check_dates("from", "to")
+    sums_only = request.args.get("sums") == "1"
+    with read_db() as con:
+        currencies, _ = _app_currencies(con)
+        account = next((a for a in reads.get_accounts(con) if a["uid"] == uid), None)
+        if not account:
+            raise ApiError("not found", 404)
+        opening = _opening_balance(con, uid, request.args["from"])
+        f = _app_filters(con, account=uid, show_mirror="show", show_deleted="hide")
+        if sums_only:
+            rows = reads.sums(con, f, "date")
+        else:
+            lookups = reads.category_lookups(con)
+            rows = reads.list_transactions(con, f, sort="date", direction="asc", limit=None)
+    days, balance = {}, opening
+    for r in rows:
+        signed = _BALANCE_SIGN.get(r["DO_TYPE"], 0) * (_num_or_none(r["total" if sums_only else "AMOUNT_ACCOUNT"]) or 0.0)
+        balance += signed
+        day = days.setdefault(r["key" if sums_only else "WDATE"], {"deposit": 0.0, "withdrawal": 0.0, "rows": []})
+        day["deposit" if signed >= 0 else "withdrawal"] += abs(signed)
+        if not sums_only:
+            day["rows"].insert(0, {**_app_row(r, lookups, currencies), "amount": abs(signed),
+                                   "currency": account["currencyUid"], "balance": round(balance, 6)})
+    # Not rounded to the currency's decimals, see app_sums().
+    out = []
+    for date, day in sorted(days.items(), reverse=True):
+        day.update(deposit=round(day["deposit"], 6), withdrawal=round(day["withdrawal"], 6))
+        if sums_only:
+            del day["rows"]
+        out.append({"date": date, **day})
+    return jsonify(ok=True, name=account["NIC_NAME"], currency=account["currencyUid"],
+                   opening=round(opening, 6), closing=round(balance, 6), days=out)
+
+
+@app.route("/api/app/transactions/<uid>")
+def app_transaction(uid):
+    """One transaction as the edit form shows it: its amount in its
+    account's currency, and as entered (entered_currency: the currency's
+    uid)."""
+    with read_db() as con:
+        r = reads.get_transaction(con, uid)
+    if not r:
+        raise ApiError("not found", 404)
+    return jsonify(ok=True, transaction={
+        "uid": r["uid"], "type": r["DO_TYPE"], "date": r["WDATE"], "time": (r["tx_time"] or "")[:5],
+        "account": r["account_uid"], "to_account": r["to_account_uid"], "category": r["ctgUid"] or "",
+        "amount": _num_or_none(r["AMOUNT_ACCOUNT"]), "currency": r["account_currency_uid"],
+        "entered_amount": _num_or_none(r["IN_ZMONEY"]), "entered_currency": r["currency_uid"],
+        "note": r["ZCONTENT"] or "", "description": r["ZDATA"] or "",
+    })
+
+
+@app.route("/api/app/networth")
+def app_networth():
+    """All accounts' total (deleted ones aside) in the main currency at the
+    start of from, and how it changed each day to to, for the Accounts
+    chart. Balances add up raw amounts, as the account list's do."""
+    _check_dates("from", "to")
+    start = datetime.strptime(request.args["from"], "%Y-%m-%d")
+    with read_db() as con:
+        currencies, _ = _app_currencies(con)
+        live = [("account", a["uid"]) for a in reads.get_accounts(con) if str(a["account_flags"]) != "1"]
+        if not live:
+            return jsonify(ok=True, opening=0.0, days=[])
+        before = reads.sums(con, reads.parse_transaction_filters(con, MultiDict(
+            [("to", (start - timedelta(days=1)).strftime("%Y-%m-%d")), ("show_mirror", "show"), *live])), "account")
+        during = reads.sums(con, reads.parse_transaction_filters(con, MultiDict(
+            [("from", request.args["from"]), ("to", request.args["to"]), ("show_mirror", "show"), *live])), "date")
+
+    def signed(r):
+        return (_BALANCE_SIGN.get(r["DO_TYPE"], 0) * (r["total"] or 0.0)
+                * currencies.get(r["currency_uid"], {}).get("rate", 1.0))
+
+    days = {}
+    for r in during:
+        days[r["key"]] = days.get(r["key"], 0.0) + signed(r)
+    return jsonify(ok=True, opening=round(sum(signed(r) for r in before), 6),
+                   days=[{"date": k, "change": round(v, 6)} for k, v in sorted(days.items())])
+
+
+@app.route("/api/app/accounts", methods=["POST"])
+def app_add_account():
+    """An account: name, group and currency, as edits.create_account takes them."""
+    with write_db() as con:
+        uid = edits.create_account(con, _json_body())
+    return jsonify(ok=True, uid=uid)
+
+
+@app.route("/api/app/accounts/<uid>", methods=["PATCH"])
+def app_edit_account(uid):
+    """Any of edits.ACCOUNT_FIELDS (status 3 hides it, 1 deletes it), or
+    move: -1 or 1 to move it up or down in its group."""
+    data = dict(_json_body())
+    move = data.pop("move", None)
+    with write_db() as con:
+        if move is not None:
+            edits.move_account(con, uid, move)
+        if data:
+            edits.update_account(con, uid, data)
+    return jsonify(ok=True)
+
+
+@app.route("/api/app/categories/<int:tree>", methods=["POST"])
+def app_add_category(tree):
+    """A category in a tree (0 income, 1 expense): name, and parent for a child."""
+    with write_db() as con:
+        uid = edits.create_category(con, tree, _json_body())
+    return jsonify(ok=True, uid=uid)
+
+
+@app.route("/api/app/categories/<int:tree>/<uid>", methods=["PATCH"])
+def app_edit_category(tree, uid):
+    """A new name, or move: -1 or 1 to move it up or down among its siblings."""
+    data = dict(_json_body())
+    move = data.pop("move", None)
+    with write_db() as con:
+        if move is not None:
+            edits.move_category(con, uid, tree, move)
+        if data:
+            edits.update_category(con, uid, tree, data)
+    return jsonify(ok=True)
+
+
+@app.route("/api/app/categories/<int:tree>/<uid>", methods=["DELETE"])
+def app_delete_category(tree, uid):
+    with write_db() as con:
+        edits.delete_category(con, uid, tree)
+    return jsonify(ok=True)
+
+
+@app.route("/api/app/bookmarks")
+def app_bookmarks():
+    """The app's bookmarks, in the fields the add form takes."""
+    with read_db() as con:
+        rows = reads.get_bookmarks(con)
+    return jsonify(ok=True, bookmarks=[{
+        "uid": r["uid"], "type": str(r["DO_TYPE"]), "account": r["assetUid"] or "", "to_account": r["toAssetUid"] or "",
+        "category": r["ctgUid"] or "", "amount": _num_or_none(r["AMOUNT_SUB"]), "currency": r["currencyUid"] or "",
+        "note": r["PAYEE"] or "", "description": r["MEMO"] or "",
+    } for r in rows])
+
+
+@app.route("/api/app/bookmarks", methods=["POST"])
+def app_add_bookmark():
+    with write_db() as con:
+        uid = edits.create_bookmark(con, _json_body())
+    return jsonify(ok=True, uid=uid)
+
+
+@app.route("/api/app/bookmarks/<uid>", methods=["DELETE"])
+def app_delete_bookmark(uid):
+    with write_db() as con:
+        edits.delete_bookmark(con, uid)
+    return jsonify(ok=True)
+
+
+@app.route("/api/app/suggestions")
+def app_suggestions():
+    """Notes used before, most recent first, for the form's note field."""
+    with read_db() as con:
+        notes = reads.get_suggestions(con, "note", limit=500)
+    return jsonify(ok=True, notes=notes)
+
+
+APP_SEARCH_LIMIT = 300
+
+
+@app.route("/api/app/search")
+def app_search():
+    """Transactions with q in their note or description, under the
+    /editor/transactions filters, newest first (the first APP_SEARCH_LIMIT), and
+    the income, expense and transfer totals of all of them in the main
+    currency."""
+    with read_db() as con:
+        currencies, _ = _app_currencies(con)
+        lookups = reads.category_lookups(con)
+        f = reads.narrow_by_text(reads.parse_transaction_filters(con, request.args), request.args.get("q", "").strip())
+        count = reads.count_transactions(con, f)
+        rows = reads.list_transactions(con, f, limit=APP_SEARCH_LIMIT)
+        sums = reads.sums(con, f, "account")
+    totals = {"0": 0.0, "1": 0.0, "3": 0.0}
+    for r in sums:
+        if r["DO_TYPE"] in totals:
+            totals[r["DO_TYPE"]] += r["in_main"] or 0.0
+    return jsonify(ok=True, count=count, rows=[_app_row(r, lookups, currencies) for r in rows],
+                   income=round(totals["0"], 6), expense=round(totals["1"], 6), transfer=round(totals["3"], 6))
+
+
+# Account groups of this ASSETGROUP.TYPE hold cash.
+CASH_GROUP_TYPE = 11
+
+
+@app.route("/api/app/total")
+def app_total():
+    """The Total tab for month (YYYY-MM): each expense budget in force with
+    what's been spent against it (in the main currency; a root category's
+    budget counts its children's rows, and a child's budget is listed under
+    its root's), the month's expenses and the month before's, and the
+    expenses paid from cash accounts."""
+    try:
+        first = datetime.strptime(request.args.get("month", "") + "-01", "%Y-%m-%d")
+    except ValueError:
+        raise ApiError("month must be YYYY-MM")
+    last = (first + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+    before = first - timedelta(days=1)
+
+    def expenses(con, start, end, by):
+        args = MultiDict([("from", start.strftime("%Y-%m-%d")), ("to", end.strftime("%Y-%m-%d")), ("type", "1")])
+        return reads.sums(con, reads.parse_transaction_filters(con, args), by)
+
+    with read_db() as con:
+        lookup = reads.category_lookup(con, 1)
+        tree = reads.build_category_tree(con, 1)
+        budgets = reads.get_budgets(con, first.strftime("%Y%m"))
+        by_category = expenses(con, first, last, "category")
+        by_account = expenses(con, first, last, "account")
+        previous = sum(r["in_main"] or 0.0 for r in expenses(con, before.replace(day=1), before, "account"))
+        cash_groups = {g["uid"] for g in reads.get_asset_groups(con) if g["TYPE"] == CASH_GROUP_TYPE}
+        cash_accounts = {a["uid"] for a in reads.get_account_rows(con) if a["group_uid"] in cash_groups}
+    spent = {}
+    for r in by_category:
+        spent[r["key"]] = spent.get(r["key"], 0.0) + (r["in_main"] or 0.0)
+    for uid, amount in list(spent.items()):
+        cat = lookup.get(uid)
+        if cat and cat["status"] != 0:
+            spent[cat["parent_uid"]] = spent.get(cat["parent_uid"], 0.0) + amount
+    total = sum(v for k, v in spent.items() if not (lookup.get(k) and lookup[k]["status"] != 0))
+    out, roots = [], {}
+    for b in budgets:
+        if str(b["DO_TYPE"]) != "1" or b["amount"] is None:
+            continue
+        if b["is_total"] in (1, "1"):
+            out.insert(0, {"name": "Total Budget", "amount": b["amount"], "spent": round(total, 6), "children": []})
+            continue
+        cat = lookup.get(b["category"])
+        if not cat:
+            continue
+        item = {"uid": b["category"], "name": cat["name"], "amount": b["amount"],
+                "spent": round(spent.get(b["category"], 0.0), 6), "children": []}
+        if cat["status"] == 0:
+            roots[b["category"]] = item
+            out.append(item)
+        elif cat["parent_uid"] in roots:
+            roots[cat["parent_uid"]]["children"].append(item)
+        else:
+            out.append(item)
+    # In the category tree's order, as the app lists them.
+    order = {uid: i for i, uid in enumerate(u for r in tree for u in [r["uid"], *(c["uid"] for c in r["children"])])}
+    out.sort(key=lambda b: -1 if "uid" not in b else order.get(b["uid"], len(order)))
+    for b in out:
+        b["children"].sort(key=lambda c: order.get(c["uid"], len(order)))
+    cash = sum(r["in_main"] or 0.0 for r in by_account if r["key"] in cash_accounts)
+    return jsonify(ok=True, budgets=out, expenses=round(total, 6), previous=round(previous, 6), cash=round(cash, 6))
+
+
+@app.route("/api/app/transactions", methods=["POST"])
+def app_add_transaction():
+    """Fields as edits.create_transaction takes them."""
+    with write_db() as con:
+        uid = edits.create_transaction(con, _json_body())
+    return jsonify(ok=True, uid=uid)
+
+
+@app.route("/api/app/transactions/<uid>", methods=["PATCH"])
+def app_edit_transaction(uid):
+    """The fields that changed, as edits.update_transaction takes them."""
+    with write_db() as con:
+        edits.update_transaction(con, uid, _json_body())
+    return jsonify(ok=True)
+
+
+@app.route("/api/app/transactions/<uid>", methods=["DELETE"])
+def app_delete_transaction(uid):
+    with write_db() as con:
+        edits.delete_transaction(con, uid)
+    return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------------------
 # Routes - public API (/api/v1/, see docs/openapi.yaml)
 # ---------------------------------------------------------------------------
 
@@ -1512,27 +1628,6 @@ TX_TYPE_NAMES = {
 }
 TX_TYPE_CODES = {name: code for code, name in TX_TYPE_NAMES.items()}
 ACCOUNT_STATUS_NAMES = {"0": "normal", "1": "deleted", "3": "hidden"}
-
-# When MMW saw a row change: its stamp in the change log, or the app's
-# UTIME for a row never stamped (dbstore.Store.stamp_changes).
-_V1_CHANGED = "COALESCE(ch.changed, CAST(i.UTIME AS INTEGER))"
-_V1_CHANGES_JOIN = f"LEFT JOIN mmw.{dbstore.CHANGES_TABLE} ch ON ch.uid = i.uid"
-V1_SORT_OPTIONS = {**TX_SORT_OPTIONS, "updated": _V1_CHANGED + " {dir}"}
-
-_V1_TX_SQL = f"""
-    SELECT i.uid, i.WDATE, i.ZDATE, i.DO_TYPE, i.IS_DEL, i.AMOUNT_ACCOUNT, i.IN_ZMONEY,
-           i.ZCONTENT, i.ZDATA, i.ctgUid, i.txUidTrans, i.UTIME, {_V1_CHANGED} AS changed_ms,
-           time(CAST(i.ZDATE AS INTEGER) / 1000, 'unixepoch', 'localtime') AS tx_time,
-           cu.ISO AS currency_iso, acu.ISO AS account_currency_iso,
-           a.uid AS account_uid, a.NIC_NAME AS account_name,
-           ta.uid AS to_account_uid, ta.NIC_NAME AS to_account_name
-    FROM INOUTCOME i
-    LEFT JOIN ASSETS a     ON a.uid = i.assetUid
-    LEFT JOIN ASSETS ta    ON ta.uid = i.toAssetUid
-    LEFT JOIN CURRENCY cu  ON cu.uid = i.currencyUid
-    LEFT JOIN CURRENCY acu ON acu.uid = a.currencyUid
-    {_V1_CHANGES_JOIN}
-"""
 
 
 def _num_or_none(v, cast=float):
@@ -1562,7 +1657,7 @@ def _int_arg(name, default, lo, hi=None):
 
 def _v1_transaction(r, lookups):
     do_type = r["DO_TYPE"]
-    _, path = category_path(lookups[0 if do_type == "0" else 1], r["ctgUid"])
+    _, path = reads.category_path(lookups[0 if do_type == "0" else 1], r["ctgUid"])
     return {
         "uid": r["uid"],
         "type": TX_TYPE_NAMES.get(do_type, do_type),
@@ -1588,25 +1683,17 @@ def _v1_transaction(r, lookups):
     }
 
 
-def _category_lookups():
-    return {0: category_lookup(0), 1: category_lookup(1)}
-
-
-def _v1_get_transaction(uid):
-    rows = query(_V1_TX_SQL + " WHERE i.uid = ?", (uid,))
-    if not rows:
+def _v1_get_transaction(con, uid):
+    row = reads.get_transaction(con, uid)
+    if not row:
         raise ApiError("not found", 404)
-    return _v1_transaction(rows[0], _category_lookups())
+    return _v1_transaction(row, reads.category_lookups(con))
 
 
-def _v1_get_transactions(uids):
+def _v1_get_transactions(con, uids):
     """{uid: transaction} for these uids; missing ones are left out."""
-    uids, lookups, out = list(uids), _category_lookups(), {}
-    for n in range(0, len(uids), 500):
-        part = uids[n:n + 500]
-        for r in query(f"{_V1_TX_SQL} WHERE i.uid IN ({','.join('?' for _ in part)})", part):
-            out[r["uid"]] = _v1_transaction(r, lookups)
-    return out
+    lookups = reads.category_lookups(con)
+    return {uid: _v1_transaction(r, lookups) for uid, r in reads.get_transactions(con, uids).items()}
 
 
 def _same_value(have, want):
@@ -1623,7 +1710,7 @@ def _v1_check_expect(con, uid, expect, lookups):
     count."""
     if not isinstance(expect, dict):
         raise ApiError("expect must be an object")
-    row = con.execute(_V1_TX_SQL + " WHERE i.uid = ?", (uid,)).fetchone()
+    row = reads.get_transaction(con, uid)
     if not row:
         raise ApiError("not found", 404)
     have = _v1_transaction(row, lookups)
@@ -1676,6 +1763,8 @@ def v1_status():
 
 @app.route("/api/v1/accounts")
 def v1_accounts():
+    with read_db() as con:
+        rows = reads.get_account_rows(con)
     return jsonify(ok=True, accounts=[{
         "uid": r["uid"],
         "name": r["NIC_NAME"],
@@ -1685,17 +1774,20 @@ def v1_accounts():
         "balance": r["balance"] or 0,
         "transaction_count": r["tx_count"],
         "status": ACCOUNT_STATUS_NAMES.get(str(r["account_flags"]), "other"),
-    } for r in get_account_rows()])
+    } for r in rows])
 
 
 @app.route("/api/v1/categories")
 def v1_categories():
-    return jsonify(ok=True, income=build_category_tree(0), expense=build_category_tree(1))
+    with read_db() as con:
+        income, expense = reads.build_category_tree(con, 0), reads.build_category_tree(con, 1)
+    return jsonify(ok=True, income=income, expense=expense)
 
 
 @app.route("/api/v1/currencies")
 def v1_currencies():
-    rows = query("SELECT uid, ISO, RATE, DECIMAL_POINT FROM CURRENCY ORDER BY ISO")
+    with read_db() as con:
+        rows = reads.get_currencies(con)
     return jsonify(ok=True, currencies=[{
         "uid": r["uid"], "iso": r["ISO"], "rate": _num_or_none(r["RATE"]),
         "decimals": _num_or_none(r["DECIMAL_POINT"], int),
@@ -1704,35 +1796,33 @@ def v1_currencies():
 
 @app.route("/api/v1/transactions")
 def v1_transactions():
-    """The /transactions filters, as the same query-string parameters, with
+    """The /editor/transactions filters, as the same query-string parameters, with
     limit/offset paging."""
-    f = parse_transaction_filters(request.args)
-    where, params = f["build_where"]()
     updated_since = _int_arg("updated_since", None, 0)
-    if updated_since is not None:
-        where += f" AND {_V1_CHANGED} >= ?"
-        params.append(updated_since)
     limit = _int_arg("limit", 100, 1, 1000)
     offset = _int_arg("offset", 0, 0)
     sort_by = request.args.get("sort", "date")
     sort_dir = request.args.get("dir", "desc")
-    if sort_by not in V1_SORT_OPTIONS:
-        raise ApiError(f"sort must be one of: {', '.join(V1_SORT_OPTIONS)}")
+    if sort_by not in reads.TX_SORT_OPTIONS:
+        raise ApiError(f"sort must be one of: {', '.join(reads.TX_SORT_OPTIONS)}")
     if sort_dir not in ("asc", "desc"):
         raise ApiError("dir must be asc or desc")
-    total = query(f"SELECT COUNT(*) AS n FROM INOUTCOME i {_V1_CHANGES_JOIN} WHERE {where}", params)[0]["n"]
-    rows = query(
-        f"{_V1_TX_SQL} WHERE {where} ORDER BY {V1_SORT_OPTIONS[sort_by].format(dir=sort_dir)}, i.uid LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    )
-    lookups = _category_lookups()
+    with read_db() as con:
+        f = reads.parse_transaction_filters(con, request.args)
+        total = reads.count_transactions(con, f, updated_since)
+        # The API's "updated" is when MMW saw a row change.
+        order = "changed" if sort_by == "updated" else sort_by
+        rows = reads.list_transactions(con, f, order, sort_dir, limit, offset, updated_since)
+        lookups = reads.category_lookups(con)
     return jsonify(ok=True, total=total, limit=limit, offset=offset,
                    transactions=[_v1_transaction(r, lookups) for r in rows])
 
 
 @app.route("/api/v1/transactions/<uid>")
 def v1_transaction(uid):
-    return jsonify(ok=True, transaction=_v1_get_transaction(uid))
+    with read_db() as con:
+        tx = _v1_get_transaction(con, uid)
+    return jsonify(ok=True, transaction=tx)
 
 
 @app.route("/api/v1/transactions", methods=["POST"])
@@ -1748,7 +1838,8 @@ def v1_add_transaction():
         data["date"], data["time"] = now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S")
     with write_db() as con:
         uid = edits.create_transaction(con, data)
-    return jsonify(ok=True, transaction=_v1_get_transaction(uid)), 201
+        tx = _v1_get_transaction(con, uid)
+    return jsonify(ok=True, transaction=tx), 201
 
 
 @app.route("/api/v1/transactions/<uid>", methods=["PATCH"])
@@ -1758,10 +1849,10 @@ def v1_edit_transaction(uid):
     field values the row must have first. A transfer's other row comes back
     as mirror."""
     with write_db() as con:
-        mirror_uid = _v1_apply_change(con, uid, _json_body(), _category_lookups())
-    out = {"ok": True, "transaction": _v1_get_transaction(uid)}
-    if mirror_uid:
-        out["mirror"] = _v1_get_transaction(mirror_uid)
+        mirror_uid = _v1_apply_change(con, uid, _json_body(), reads.category_lookups(con))
+        out = {"ok": True, "transaction": _v1_get_transaction(con, uid)}
+        if mirror_uid:
+            out["mirror"] = _v1_get_transaction(con, mirror_uid)
     return jsonify(out)
 
 
@@ -1779,8 +1870,9 @@ def v1_edit_transactions():
         raise ApiError("send changes, a list of changes")
     if len(changes) > V1_BATCH_LIMIT:
         raise ApiError(f"send at most {V1_BATCH_LIMIT} changes at a time")
-    lookups, done, errors = _category_lookups(), [], []
+    done, errors = [], []
     with write_db() as con:
+        lookups = reads.category_lookups(con)
         for i, change in enumerate(changes):
             uid = change.get("uid") if isinstance(change, dict) else None
             # A failed change is undone on its own, so the ones after it are
@@ -1797,7 +1889,7 @@ def v1_edit_transactions():
             con.execute("RELEASE change")
         if errors:
             raise ApiError(f"{len(errors)} of {len(changes)} changes failed; nothing was written", errors=errors)
-    rows = _v1_get_transactions({u for pair in done for u in pair if u})
+        rows = _v1_get_transactions(con, {u for pair in done for u in pair if u})
     return jsonify(ok=True, results=[{"transaction": rows[u], **({"mirror": rows[m]} if m else {})}
                                      for u, m in done])
 

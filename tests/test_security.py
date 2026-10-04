@@ -15,7 +15,7 @@ def anon(data_dir):
 
 
 def test_anonymous_page_redirects_to_login(anon):
-    r = anon.get("/transactions")
+    r = anon.get("/editor/transactions")
     assert r.status_code == 302 and "/login" in r.headers["Location"]
 
 
@@ -25,7 +25,7 @@ def test_anonymous_api_gets_401_json(anon):
 
 
 def test_no_users_redirects_to_first_account(data_dir):
-    r = appmod.app.test_client().get("/transactions")
+    r = appmod.app.test_client().get("/editor/transactions")
     assert r.status_code == 302 and "/setup/account" in r.headers["Location"]
 
 
@@ -34,7 +34,7 @@ def test_healthz_is_public(anon):
 
 
 def test_security_headers(client):
-    r = client.get("/transactions")
+    r = client.get("/editor/transactions")
     assert "frame-ancestors 'none'" in r.headers["Content-Security-Policy"]
     assert r.headers["X-Frame-Options"] == "DENY"
     assert r.headers["Cache-Control"] == "no-store"
@@ -78,7 +78,7 @@ def test_lockout_blocks_even_correct_password(anon):
 
 
 @pytest.mark.parametrize("target, ok", [
-    ("/transactions", True),
+    ("/editor/transactions", True),
     ("//evil.com", False),
     ("https://evil.com", False),
     ("/\\evil.com", False),
@@ -169,7 +169,7 @@ def test_unsupported_version_is_409(client, monkeypatch):
     monkeypatch.setattr(dbstore, "SUPPORTED_USER_VERSIONS", {99})
     r = client.get("/api/transactions/uids")
     assert r.status_code == 409
-    r = client.get("/transactions")
+    r = client.get("/editor/transactions")
     assert r.status_code == 409
 
 
@@ -178,7 +178,7 @@ def test_no_database_redirects_to_setup(data_dir):
     c = appmod.app.test_client()
     with c.session_transaction() as s:
         s.update(user="bob", ver=1, csrf="t")
-    assert "/setup" in c.get("/transactions").headers["Location"]
+    assert "/setup" in c.get("/editor/transactions").headers["Location"]
     assert c.get("/api/transactions/uids").status_code == 409
 
 
@@ -186,7 +186,7 @@ def test_no_database_redirects_to_setup(data_dir):
 
 def test_every_page_header_shows_the_version(client):
     import app as appmod
-    for url in ("/transactions", "/settings"):
+    for url in ("/editor/transactions", "/settings"):
         assert f'class="muted app-version" title="Version">{appmod.VERSION}<' in client.get(url).get_data(as_text=True)
 
 

@@ -1,7 +1,9 @@
 # Static files (PWA)
 
 Icons (`icon.svg` is the source; the PNGs are rendered from it),
-`manifest.webmanifest`, `sw.js` and `offline.html`. The manifest and worker
+`manifest.webmanifest`, `sw.js` and `offline.html`. `app/` holds the app's
+`app.js` and `app.css` (see `templates/AGENTS.md`), loaded with
+`?v=<version>` so a release replaces them. The manifest and worker
 are served from the root (`/manifest.webmanifest`, `/sw.js`, both public).
 
 The worker only caches the offline page: never make it cache pages or

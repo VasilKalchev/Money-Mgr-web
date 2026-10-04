@@ -1,5 +1,6 @@
 """Every edit to a user's MM database outside sync: adding, changing and
-deleting transactions, and changing accounts and categories.
+deleting transactions, adding, changing, moving and deleting accounts and
+categories, and the app's bookmarks.
 
 The pages' /api/ routes and the public /api/v1/ routes both go through here,
 so the rules that keep the database the way the app expects live in one
@@ -182,7 +183,10 @@ def create_transaction(con, data):
     """Insert a transaction (two linked rows for a transfer) and return its
     uid. data: type (a DO_TYPE code), account, amount, date, and as the type
     needs, time, category, to_account, to_amount, note, description, and
-    entered_amount with entered_currency."""
+    entered_amount with entered_currency. A transfer can carry a fee (an
+    amount in the sending account's currency) with fee_category (expense
+    tree) and fee_note: an expense on the sending account, tied to both legs
+    by txUidFee as the app does."""
     do_type = data.get("type", "")
     if do_type not in ("0", "1", "3", "7", "8"):
         raise EditError("invalid type")
@@ -214,6 +218,14 @@ def create_transaction(con, data):
         entered_currency_uid = _currency_uid(con, data["entered_currency"])
     if "to_amount" in data and not is_transfer:
         raise EditError("to_amount is only for transfers")
+    fee = None
+    if data.get("fee") not in (None, "", 0):
+        if not is_transfer:
+            raise EditError("a fee is only for transfers")
+        fee = _amount_arg(data["fee"], "fee")
+        _check_category(con, data.get("fee_category"), 1)
+        if not isinstance(data.get("fee_note", ""), str):
+            raise EditError("fee_note must be text")
 
     date_str = data.get("date", "")
     dt = _parse_datetime(date_str, data.get("time", ""))
@@ -248,6 +260,7 @@ def create_transaction(con, data):
             to_amount = round(amount * rate / to_rate, 2) if to_rate else amount
         mirror_uid = str(uuid.uuid4())
         tx_uid_trans = str(uuid.uuid4())
+        fee_link = str(uuid.uuid4()) if fee else ""
         con.execute(
             """
             INSERT INTO INOUTCOME
@@ -255,14 +268,27 @@ def create_transaction(con, data):
                  assetUid, toAssetUid, currencyUid, ctgUid, txUidTrans, txUidFee,
                  IS_DEL, CARDDIVIDMONTH, MARK, syncVersion, isSynced, UTIME)
             VALUES
-                (?, ?, ?, '3', ?, ?, ?, ?, ?, ?, ?, ?, '', ?, '', 0, '0', 0, 0, 0, ?),
-                (?, ?, ?, '4', ?, ?, ?, ?, ?, ?, ?, ?, '', ?, '', 0, '0', 0, 0, 0, ?)
+                (?, ?, ?, '3', ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, 0, '0', 0, 0, 0, ?),
+                (?, ?, ?, '4', ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, 0, '0', 0, 0, 0, ?)
             """,
             (uid, date_str, zdate, note, description, amount, entered_amount, round(amount * rate, 2),
-             account_uid, to_account_uid, entered_currency_uid, tx_uid_trans, now_ms,
+             account_uid, to_account_uid, entered_currency_uid, tx_uid_trans, fee_link, now_ms,
              mirror_uid, date_str, zdate, note, description, to_amount, to_amount, round(to_amount * to_rate, 2),
-             to_account_uid, account_uid, to_currency_uid, tx_uid_trans, now_ms),
+             to_account_uid, account_uid, to_currency_uid, tx_uid_trans, fee_link, now_ms),
         )
+        if fee:
+            # The app stamps the fee a millisecond after the transfer.
+            con.execute(
+                """
+                INSERT INTO INOUTCOME
+                    (uid, WDATE, ZDATE, DO_TYPE, ZCONTENT, ZDATA, AMOUNT_ACCOUNT, IN_ZMONEY, ZMONEY,
+                     assetUid, toAssetUid, currencyUid, ctgUid, txUidTrans, txUidFee,
+                     IS_DEL, CARDDIVIDMONTH, MARK, syncVersion, isSynced, UTIME)
+                VALUES (?, ?, ?, '1', ?, '', ?, ?, ?, ?, '', ?, ?, '', ?, 0, '0', 0, 0, 0, ?)
+                """,
+                (str(uuid.uuid4()), date_str, str(int(zdate) + 1), data.get("fee_note", "") or "",
+                 fee, fee, round(fee * rate, 2), account_uid, currency_uid, data["fee_category"], fee_link, now_ms),
+            )
         return uid
 
     con.execute(
@@ -407,6 +433,78 @@ def delete_transaction(con, uid):
 # Accounts and categories
 # ---------------------------------------------------------------------------
 
+# Column values the app writes into a new row it creates; _insert() fills in
+# the ones the table has, since the app reads '' where SQLite would put NULL.
+ACCOUNT_DEFAULTS = {
+    "CARD_ACCOUNT_ID": "", "CARD_ACCOUNT_NAME": "", "CARD_DAY_FIN": "1", "CARD_DAY_PAY": "1", "GROUP_ID": "",
+    "TYPE": "", "ZDATA": "0", "ZDATA1": "", "ZDATA2": "0", "AMOUNT": "", "APP_PACKAGE": "", "APP_NAME": "",
+    "SMS_TEL": "", "SMS_STRING": "", "A_SYNC_CHECK": "", "CARD_USAGE_HURDLE_TYPE": 1,
+    "CARD_USAGE_HURDLE_AMOUNT": 0.0, "A_UID": "", "CURRENCY_ID": "", "IS_TRANS_EXPENSE": 0, "IS_CARD_AUTO_PAY": 0,
+    "cardAssetUid": "", "syncTime": "", "syncVersion": "", "isSynced": 0,
+}
+CATEGORY_DEFAULTS = {"C_IS_DEL": "", "C_SYNC_CHECK": "", "C_UID": "", "PID": "", "pUid": "", "syncTime": "",
+                     "syncVersion": "", "isSynced": 0}
+BOOKMARK_DEFAULTS = {
+    "FAV_UID": "", "SYNC_CHECK": "", "IS_DEL": 0, "MARK": 0, "ACCOUNT_ID": "", "TO_ACCOUNT_ID": "", "CATEGORY_ID": "",
+    "SUBCATEGORY_ID": "", "CURRENCY_SUB": "", "CURRENCY_ID": "", "MEMO": "", "PAYEE": "", "toAssetUid": "",
+    "categoryUid": "", "subcategoryUid": "", "syncTime": "", "syncVersion": "", "ctgUid": "", "isSynced": 0,
+}
+
+
+def _insert(con, table, values, defaults):
+    """INSERT a row of values over defaults, leaving out columns the table
+    doesn't have."""
+    have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+    row = {k: v for k, v in {**defaults, **values}.items() if k in have}
+    con.execute(f"INSERT INTO {table} ({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})", list(row.values()))
+
+
+def _move(con, table, rows, uid, by, key, stamp):
+    """Move uid by one place among rows (dicts with uid and ORDERSEQ, in
+    display order) and number them 0, 1, 2, ... in their new order. key:
+    {column: value} to add to each row's WHERE; stamp: its last-write column."""
+    order = [r["uid"] for r in rows]
+    if uid not in order:
+        raise EditError("not found", 404)
+    i = order.index(uid)
+    j = i + by
+    if by not in (-1, 1) or not 0 <= j < len(order):
+        return
+    order[i], order[j] = order[j], order[i]
+    now = _now_ms()
+    current = {r["uid"]: r["ORDERSEQ"] for r in rows}
+    for n, u in enumerate(order):
+        if current[u] != n:
+            _update(con, table, {"ORDERSEQ": n, stamp: now}, {"uid": u, **key})
+
+
+def create_account(con, data):
+    """Add an account: name, group (an ASSETGROUP uid) and currency (uid or
+    ISO code, default the main one), last in its group. Returns its uid."""
+    name = _text_arg(data.get("name"), "name")
+    group = data.get("group")
+    if not _find(con, "SELECT 1 FROM ASSETGROUP WHERE uid = ?", group):
+        raise EditError("unknown group")
+    code = data.get("currency") or (_rows(con, "SELECT uid FROM CURRENCY ORDER BY IS_MAIN_CURRENCY DESC LIMIT 1")
+                                    or [{"uid": ""}])[0]["uid"]
+    currency = _currency_uid(con, code)
+    last = _rows(con, "SELECT MAX(ORDERSEQ) AS n FROM ASSETS WHERE groupUid = ?", (group,))[0]["n"]
+    uid = str(uuid.uuid4())
+    _insert(con, "ASSETS", {"uid": uid, "NIC_NAME": name, "groupUid": group, "currencyUid": currency,
+                            "ORDERSEQ": (last if last is not None else -1) + 1, "A_UTIME": _now_ms()},
+            ACCOUNT_DEFAULTS)
+    return uid
+
+
+def move_account(con, uid, by):
+    """Move an account one place up (-1) or down (1) within its group."""
+    row = _find(con, "SELECT groupUid FROM ASSETS WHERE uid = ?", uid)
+    if not row:
+        raise EditError("not found", 404)
+    rows = _rows(con, "SELECT uid, ORDERSEQ FROM ASSETS WHERE groupUid = ? AND IFNULL(ZDATA, '0') <> '1' "
+                      "ORDER BY ORDERSEQ, NIC_NAME", (row["groupUid"],))
+    _move(con, "ASSETS", rows, uid, by, {}, "A_UTIME")
+
 def update_account(con, uid, changes):
     """Change any of ACCOUNT_FIELDS of an account: name, group (an
     ASSETGROUP uid), order (ORDERSEQ, within its group) and status (one of
@@ -431,6 +529,101 @@ def update_account(con, uid, changes):
             raise EditError(f"status must be one of {', '.join(sorted(ACCOUNT_STATUSES))}")
         cols["ZDATA"] = status
     _update(con, "ASSETS", {**cols, "A_UTIME": _now_ms()}, {"uid": uid})
+
+
+def _siblings(con, tree, status, parent):
+    sql = f"SELECT uid, ORDERSEQ FROM ZCATEGORY WHERE TYPE = ? AND STATUS = ? AND {LIVE_CATEGORY}"
+    params = [tree, status]
+    if status != 0:
+        sql += " AND pUid = ?"
+        params.append(parent)
+    return _rows(con, sql + " ORDER BY ORDERSEQ", params)
+
+
+def create_category(con, tree, data):
+    """Add a category to a tree (0 income, 1 expense): name, unique among its
+    siblings, and parent (a root's uid) for a child, last among its
+    siblings. Returns its uid."""
+    if tree not in (0, 1):
+        raise EditError("tree must be 0 (income) or 1 (expense)")
+    name = _text_arg(data.get("name"), "name")
+    parent = data.get("parent") or ""
+    if parent and not _rows(con, f"SELECT 1 FROM ZCATEGORY WHERE uid = ? AND TYPE = ? AND STATUS = 0 "
+                                 f"AND {LIVE_CATEGORY}", (parent, tree)):
+        raise EditError("unknown parent category")
+    status = 2 if parent else 0
+    siblings = _siblings(con, tree, status, parent)
+    if _rows(con, f"SELECT 1 FROM ZCATEGORY WHERE TYPE = ? AND STATUS = ? AND NAME = ? AND {LIVE_CATEGORY}"
+                  + (" AND pUid = ?" if parent else ""), [tree, status, name] + ([parent] if parent else [])):
+        raise EditError(f"there is already a category called {name} here")
+    uid = str(uuid.uuid4())
+    last = max((r["ORDERSEQ"] or 0 for r in siblings), default=-1)
+    _insert(con, "ZCATEGORY", {"uid": uid, "NAME": name, "TYPE": tree, "STATUS": status, "pUid": parent,
+                               "ORDERSEQ": last + 1, "C_UTIME": _now_ms()}, CATEGORY_DEFAULTS)
+    return uid
+
+
+def move_category(con, uid, tree, by):
+    """Move a category one place up (-1) or down (1) among its siblings."""
+    row = _rows(con, "SELECT STATUS, pUid FROM ZCATEGORY WHERE uid = ? AND TYPE = ?", (uid, tree))
+    if not row:
+        raise EditError("not found", 404)
+    _move(con, "ZCATEGORY", _siblings(con, tree, row[0]["STATUS"], row[0]["pUid"]), uid, by, {"TYPE": tree},
+          "C_UTIME")
+
+
+def delete_category(con, uid, tree):
+    """Delete a category as the app does: mark it deleted (C_IS_DEL), so it
+    stays for anything that still names it. Refused while it has live
+    transactions, live children or a budget."""
+    row = _rows(con, f"SELECT STATUS FROM ZCATEGORY WHERE uid = ? AND TYPE = ? AND {LIVE_CATEGORY}", (uid, tree))
+    if not row:
+        raise EditError("not found", 404)
+    if _rows(con, f"SELECT 1 FROM ZCATEGORY WHERE TYPE = ? AND STATUS = 2 AND pUid = ? AND {LIVE_CATEGORY}",
+             (tree, uid)):
+        raise EditError("delete or move its subcategories first")
+    types = ("0",) if tree == 0 else ("1",)
+    if _rows(con, f"SELECT 1 FROM INOUTCOME WHERE ctgUid = ? AND IS_DEL = 0 AND DO_TYPE IN ({','.join('?' * len(types))})",
+             (uid, *types)):
+        raise EditError("it has transactions; move them to another category first")
+    if _rows(con, "SELECT 1 FROM BUDGET WHERE targetUid = ? AND IFNULL(IS_DEL, 0) = 0", (uid,)):
+        raise EditError("it has a budget; remove that in Money Manager first")
+    _update(con, "ZCATEGORY", {"C_IS_DEL": 1, "C_UTIME": _now_ms()}, {"uid": uid, "TYPE": tree})
+
+
+def create_bookmark(con, data):
+    """Save a transaction to enter again (the app's Bookmarks): type (0, 1
+    or 3), account, to_account, category, amount with currency (uid or ISO),
+    note and description, all but the type optional. Returns its uid."""
+    do_type = data.get("type")
+    if do_type not in ("0", "1", "3"):
+        raise EditError("invalid type")
+    values = {"uid": str(uuid.uuid4()), "DO_TYPE": int(do_type), "USETIME": _now_ms()}
+    for key, col in (("account", "assetUid"), ("to_account", "toAssetUid")):
+        if data.get(key):
+            if not _find(con, "SELECT 1 FROM ASSETS WHERE uid = ?", data[key]):
+                raise EditError(f"unknown {key}")
+            values[col] = data[key]
+    if data.get("category"):
+        _check_category(con, data["category"], int(do_type == "1"))
+        values["ctgUid"] = data["category"]
+    if data.get("amount") not in (None, ""):
+        values["AMOUNT_SUB"] = _amount_arg(data["amount"], allow_zero=True)
+        values["currencyUid"] = _currency_uid(con, data.get("currency"))
+    for key, col in (("note", "PAYEE"), ("description", "MEMO")):
+        if not isinstance(data.get(key, ""), str):
+            raise EditError(f"{key} must be text")
+        values[col] = data.get(key, "")
+    last = _rows(con, "SELECT MAX(ORDERSEQ) AS n FROM FAVTRANSACTION")[0]["n"]
+    values["ORDERSEQ"] = (last if last is not None else -1) + 1
+    _insert(con, "FAVTRANSACTION", values, BOOKMARK_DEFAULTS)
+    return values["uid"]
+
+
+def delete_bookmark(con, uid):
+    if not _find(con, "SELECT 1 FROM FAVTRANSACTION WHERE uid = ? AND IFNULL(IS_DEL, 0) = 0", uid):
+        raise EditError("not found", 404)
+    _update(con, "FAVTRANSACTION", {"IS_DEL": 1, "USETIME": _now_ms()}, {"uid": uid})
 
 
 def update_category(con, uid, tree, changes):

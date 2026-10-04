@@ -225,7 +225,7 @@ def test_duplicate_is_reviewed(client, store, export):
     html, fp, ids = review_form(client)
     assert "Possible duplicates (1)" in html and "Cinema" in html
     assert "A sync is waiting" not in html  # the banner shows on other pages only
-    assert "A sync is waiting" in client.get("/transactions").get_data(as_text=True)
+    assert "A sync is waiting" in client.get("/editor/transactions").get_data(as_text=True)
     r = apply(client, fp, **{ids[0]: "local"})
     assert r.status_code == 302 and r.location.endswith("/settings")
     assert local(store, mine) is not None and local(store, "app1") is None
