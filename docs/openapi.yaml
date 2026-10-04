@@ -93,7 +93,14 @@ paths:
       tags: [Reference data]
       operationId: listCategories
       summary: The income and expense category trees
-      description: Deleted categories are left out.
+      description: |
+        Deleted categories are left out unless `show_deleted=show`, which
+        lists them too, a deleted child under its root. Transactions keep a
+        deleted category's uid, so this finds its name and root.
+      parameters:
+        - name: show_deleted
+          in: query
+          schema: {type: string, enum: [hide, show], default: hide}
       responses:
         "200":
           description: OK
@@ -110,6 +117,7 @@ paths:
                   expense:
                     type: array
                     items: {$ref: "#/components/schemas/Category"}
+        "400": {$ref: "#/components/responses/BadRequest"}
         "401": {$ref: "#/components/responses/Unauthorized"}
         "409": {$ref: "#/components/responses/NoDatabase"}
 
@@ -250,21 +258,32 @@ paths:
     post:
       tags: [Transactions]
       operationId: addTransaction
-      summary: Add a transaction
+      summary: Add one transaction or several
       description: |
-        A transfer adds two linked rows (the transfer and its mirror). The
-        mirror's amount is `to_amount`, or else the amount converted into the
-        destination account's currency with the currencies' rates.
+        A transfer adds two linked rows (the transfer and its mirror), and
+        the response has the mirror as `mirror`. The mirror's amount is
+        `to_amount`, or else the amount converted into the destination
+        account's currency with the currencies' rates.
 
         `entered_amount` and `entered_currency` record what was typed in
         when it differs from the amount in the account's currency (a foreign
         purchase, or a pre-euro amount restated). Without them the amount is
         also the entered amount.
+
+        To add several at once, all or none (the lines of one split
+        payment), send `{"transactions": [...]}`: up to 1000, each what a
+        single POST takes, added in list order. If any fails, nothing is
+        written and the 400 lists every failing item with its reason and
+        the status a single POST would have answered. Success returns
+        `results`, one per item in order.
       requestBody:
         required: true
         content:
           application/json:
-            schema: {$ref: "#/components/schemas/NewTransaction"}
+            schema:
+              oneOf:
+                - {$ref: "#/components/schemas/NewTransaction"}
+                - {$ref: "#/components/schemas/NewTransactionBatch"}
             examples:
               expense:
                 value: {type: expense, account: "4", amount: 12.5, category: c3,
@@ -274,13 +293,29 @@ paths:
               foreign:
                 value: {type: expense, account: "4", amount: 5.11, category: c3,
                         entered_amount: 10, entered_currency: BGN}
+              several:
+                value:
+                  transactions:
+                    - {type: expense, account: "4", amount: 30, category: c3,
+                       date: "2026-10-02", time: "18:05", note: groceries}
+                    - {type: expense, account: "4", amount: 12.4, category: c7,
+                       date: "2026-10-02", time: "18:05", note: groceries}
       responses:
         "201":
           description: Added
           content:
             application/json:
-              schema: {$ref: "#/components/schemas/TransactionResponse"}
-        "400": {$ref: "#/components/responses/BadRequest"}
+              schema:
+                oneOf:
+                  - {$ref: "#/components/schemas/TransactionEditResponse"}
+                  - {$ref: "#/components/schemas/TransactionBatchResponse"}
+        "400":
+          description: |
+            Invalid input. For several transactions, nothing was written and
+            `errors` lists the failing items.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BatchError"}
         "401": {$ref: "#/components/responses/Unauthorized"}
         "403": {$ref: "#/components/responses/ReadOnly"}
         "409": {$ref: "#/components/responses/NoDatabase"}
@@ -488,18 +523,20 @@ components:
 
     Category:
       type: object
-      required: [uid, name, children]
+      required: [uid, name, deleted, children]
       properties:
         uid: {type: string}
         name: {type: [string, "null"]}
+        deleted: {type: boolean}
         children:
           type: array
           items:
             type: object
-            required: [uid, name]
+            required: [uid, name, deleted]
             properties:
               uid: {type: string}
               name: {type: [string, "null"]}
+              deleted: {type: boolean}
 
     Currency:
       type: object
@@ -598,6 +635,16 @@ components:
         mirror:
           $ref: "#/components/schemas/Transaction"
           description: For a transfer, its other row, after the change.
+
+    NewTransactionBatch:
+      type: object
+      required: [transactions]
+      properties:
+        transactions:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: {$ref: "#/components/schemas/NewTransaction"}
 
     NewTransaction:
       type: object
@@ -729,8 +776,8 @@ components:
         results:
           type: array
           description: |
-            One per change, in order, with the rows as the whole batch left
-            them.
+            One per change or transaction, in order, with the rows as the
+            whole batch left them.
           items:
             type: object
             required: [transaction]
@@ -748,18 +795,20 @@ components:
         error: {type: string}
         errors:
           type: array
-          description: Every change that failed. Missing when the request itself was invalid.
+          description: Every item that failed. Missing when the request itself was invalid.
           items:
             type: object
             required: [index, uid, status, error]
             properties:
               index:
                 type: integer
-                description: The change's place in `changes`, from 0.
-              uid: {type: [string, "null"]}
+                description: The item's place in `changes` or `transactions`, from 0.
+              uid:
+                type: [string, "null"]
+                description: The change's `uid`; null for a new transaction.
               status:
                 type: integer
-                description: What a single PATCH would have answered (400, 404 or 412).
+                description: What a single PATCH or POST would have answered (400, 404 or 412).
               error: {type: string}
 
   responses:

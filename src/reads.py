@@ -144,31 +144,36 @@ def get_suggestions(con, field, limit=1000):
 # Categories
 # ---------------------------------------------------------------------------
 
-def get_categories(con, type_filter=None):
-    """Live categories, of one tree (0 income, 1 expense) or both, roots first."""
+def get_categories(con, type_filter=None, deleted=False):
+    """Live categories (deleted ones too with deleted=True), of one tree (0
+    income, 1 expense) or both, roots first. is_deleted is 1 for a deleted
+    one."""
     sql = """
-        SELECT c.uid, c.NAME, c.TYPE, c.STATUS, c.pUid, c.ORDERSEQ, c.C_IS_DEL, p.NAME AS parent_name
+        SELECT c.uid, c.NAME, c.TYPE, c.STATUS, c.pUid, c.ORDERSEQ, c.C_IS_DEL, p.NAME AS parent_name,
+               IFNULL(NULLIF(c.C_IS_DEL, ''), 0) + 0 = 1 AS is_deleted
         FROM ZCATEGORY c
         LEFT JOIN ZCATEGORY p ON p.uid = c.pUid AND p.TYPE = c.TYPE
-        WHERE IFNULL(NULLIF(c.C_IS_DEL, ''), 0) + 0 <> 1
+        WHERE (? OR IFNULL(NULLIF(c.C_IS_DEL, ''), 0) + 0 <> 1)
     """
-    params = ()
+    params = (bool(deleted),)
     if type_filter is not None:
         sql += " AND c.TYPE = ?"
-        params = (type_filter,)
+        params += (type_filter,)
     sql += " ORDER BY c.TYPE DESC, c.STATUS, c.ORDERSEQ"
     return _rows(con, sql, params)
 
 
-def build_category_tree(con, type_filter):
-    """[{uid, name, children:[{uid,name}]}] for one tree (0=income, 1=expense)."""
-    rows = get_categories(con, type_filter)
+def build_category_tree(con, type_filter, deleted=False):
+    """[{uid, name, deleted, children:[{uid, name, deleted}]}] for one tree
+    (0=income, 1=expense), with deleted categories too if deleted=True."""
+    rows = get_categories(con, type_filter, deleted)
     roots = [r for r in rows if r["STATUS"] == 0]
     children = [r for r in rows if r["STATUS"] == 2]
     tree = []
     for r in roots:
-        kids = [{"uid": c["uid"], "name": c["NAME"]} for c in children if c["pUid"] == r["uid"]]
-        tree.append({"uid": r["uid"], "name": r["NAME"], "children": kids})
+        kids = [{"uid": c["uid"], "name": c["NAME"], "deleted": bool(c["is_deleted"])}
+                for c in children if c["pUid"] == r["uid"]]
+        tree.append({"uid": r["uid"], "name": r["NAME"], "deleted": bool(r["is_deleted"]), "children": kids})
     return tree
 
 
@@ -472,6 +477,16 @@ def get_transaction(con, uid):
     """One transaction's _TX_SELECT row, or None."""
     rows = _rows(con, f"{_TX_SELECT} WHERE i.uid = ?", (uid,))
     return rows[0] if rows else None
+
+
+def transfer_other_uid(con, uid):
+    """The uid of the other row of uid's transfer, or None if it isn't one."""
+    rows = _rows(con, """
+        SELECT o.uid FROM INOUTCOME i
+        JOIN INOUTCOME o ON o.txUidTrans = i.txUidTrans AND o.uid <> i.uid AND o.DO_TYPE IN ('3', '4')
+        WHERE i.uid = ? AND i.DO_TYPE IN ('3', '4') AND IFNULL(i.txUidTrans, '') <> ''
+    """, (uid,))
+    return rows[0]["uid"] if len(rows) == 1 else None
 
 
 def get_transactions(con, uids):

@@ -234,10 +234,27 @@ def test_accounts(api):
 def test_categories_and_currencies(api):
     d = api.get("categories").get_json()
     food = next(c for c in d["expense"] if c["uid"] == "c-food")
-    assert food["children"] == [{"uid": "c-food-out", "name": "Eating out"}]
+    assert food["deleted"] is False
+    assert food["children"] == [{"uid": "c-food-out", "name": "Eating out", "deleted": False}]
     assert [c["uid"] for c in d["income"]] == ["c-salary"]
     cur = api.get("currencies").get_json()["currencies"]
     assert {c["iso"]: c["rate"] for c in cur} == {"EUR": 1.0, "USD": 0.9}
+
+
+def test_categories_show_deleted(api):
+    mmbak.execute(db_path(), "INSERT INTO ZCATEGORY (C_IS_DEL, NAME, ORDERSEQ, TYPE, STATUS, uid, pUid) VALUES "
+                             "(1, 'Old', 3, 1, 2, 'c-old', 'c-food'), (1, 'Gone', 4, 1, 0, 'c-gone', NULL), "
+                             "(1, 'Gone kid', 1, 1, 2, 'c-gone-kid', 'c-gone'), ('', 'Bonus', 2, 0, 0, 'c-bonus', NULL)")
+    tree = lambda d: {c["uid"]: (c["deleted"], [(k["uid"], k["deleted"]) for k in c["children"]])
+                      for t in ("income", "expense") for c in d[t]}
+    hidden = tree(api.get("categories").get_json())
+    assert hidden == tree(api.get("categories?show_deleted=hide").get_json())
+    assert hidden == {"c-food": (False, [("c-food-out", False)]), "c-fun": (False, []),
+                      "c-salary": (False, []), "c-bonus": (False, [])}  # '' is live, as the app writes it
+    assert tree(api.get("categories?show_deleted=show").get_json()) == {
+        **hidden, "c-food": (False, [("c-food-out", False), ("c-old", True)]),
+        "c-gone": (True, [("c-gone-kid", True)])}
+    assert api.get("categories?show_deleted=only").status_code == 400
 
 
 # -- writes -----------------------------------------------------------------------
@@ -258,9 +275,13 @@ def test_add_without_date_means_now(api):
 
 
 def test_add_transfer(api):
-    t = api.post("transactions", {"type": "transfer", "account": "a1", "to_account": "a2", "amount": 9}).get_json()["transaction"]
+    d = api.post("transactions", {"type": "transfer", "account": "a1", "to_account": "a2", "amount": 9}).get_json()
+    t, m = d["transaction"], d["mirror"]
     assert (t["type"], t["to_account"]) == ("transfer", "Bank")
+    assert (m["type"], m["account_uid"], m["transfer_id"]) == ("transfer_mirror", "a2", t["transfer_id"])
     assert count() == 8
+    d = api.post("transactions", {"type": "expense", "account": "a1", "amount": 1, "category": "c-fun"}).get_json()
+    assert "mirror" not in d
 
 
 @pytest.mark.parametrize("body", [
@@ -558,6 +579,55 @@ def test_batch_patch_limit(api):
     assert api.patch("transactions", {"changes": [{"uid": "t1", "note": "x"}] * 1001}).status_code == 400
     r = api.patch("transactions", {"changes": [{"uid": "t1", "note": str(i)} for i in range(1000)]})
     assert r.status_code == 200 and row("t1")["ZCONTENT"] == "999"
+
+
+def test_batch_post_adds_in_order(api):
+    r = api.post("transactions", {"transactions": [
+        {"type": "expense", "account": "a1", "amount": 30, "category": "c-food", "date": "2026-10-02",
+         "time": "18:05", "note": "groceries"},
+        {"type": "expense", "account": "a1", "amount": 12.4, "category": "c-fun", "date": "2026-10-02",
+         "time": "18:05", "note": "groceries", "entered_amount": 13.8, "entered_currency": "USD"},
+        {"type": "transfer", "account": "a1", "to_account": "a2", "amount": 9},
+    ]})
+    assert r.status_code == 201, r.get_json()
+    res = r.get_json()["results"]
+    assert [(x["transaction"]["type"], x["transaction"]["amount"]) for x in res] == [
+        ("expense", 30), ("expense", 12.4), ("transfer", 9)]
+    assert "mirror" not in res[0] and res[2]["mirror"]["type"] == "transfer_mirror"
+    assert (res[1]["transaction"]["entered_amount"], res[1]["transaction"]["entered_currency"]) == (13.8, "USD")
+    assert count() == 6 + 4
+    assert row(res[0]["transaction"]["uid"])["ZCONTENT"] == "groceries"
+
+
+def test_batch_post_is_all_or_nothing(api):
+    r = api.post("transactions", {"transactions": [
+        {"type": "expense", "account": "a1", "amount": 30, "category": "c-food"},
+        {"type": "expense", "account": "a1", "amount": 1, "category": "c-salary"},
+        {"type": "transfer_mirror", "account": "a1", "to_account": "a2", "amount": 1},
+        {"type": "expense", "account": "nope", "amount": 1, "category": "c-food", "uid": "mine"},
+        "junk",
+    ]})
+    assert r.status_code == 400
+    d = r.get_json()
+    assert d["error"] == "4 of 5 transactions failed; nothing was written"
+    assert [(e["index"], e["uid"], e["status"]) for e in d["errors"]] == [
+        (1, None, 400), (2, None, 400), (3, None, 400), (4, None, 400)]
+    assert d["errors"][2]["error"] == "unknown account"
+    assert count() == 6
+
+
+@pytest.mark.parametrize("body", [{"transactions": []}, {"transactions": {"type": "expense"}}, {"transactions": None}])
+def test_batch_post_rejects(api, body):
+    assert api.post("transactions", body).status_code == 400
+    assert count() == 6
+
+
+def test_batch_post_limit_and_token(api):
+    item = {"type": "expense", "account": "a1", "amount": 1, "category": "c-fun"}
+    assert api.post("transactions", {"transactions": [item] * 1001}).status_code == 400
+    ro = users.create_token("alice", "ro")
+    assert api.post("transactions", {"transactions": [item]}, token=ro).status_code == 403
+    assert count() == 6
 
 
 def test_batch_patch_needs_a_write_token(api):

@@ -5,6 +5,17 @@ Notable changes to Money Mgr web. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- API: `POST /transactions` adds up to 1000 transactions in one request,
+  sent as `{"transactions": [...]}`, in order and all or nothing, so the
+  lines of a split payment are never half written. A refusal lists every
+  transaction that failed and why.
+- API: adding a transfer returns its other row as `mirror`.
+- API: `GET /categories?show_deleted=show` lists deleted categories too,
+  so a transaction that keeps a deleted category can still be shown with
+  its name and root. Every category now has `deleted`.
+
 ## [1.3.0] - 2026-10-04
 
 ### Added

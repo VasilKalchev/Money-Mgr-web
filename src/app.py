@@ -1779,8 +1779,12 @@ def v1_accounts():
 
 @app.route("/api/v1/categories")
 def v1_categories():
+    show_deleted = request.args.get("show_deleted", "hide")
+    if show_deleted not in ("hide", "show"):
+        raise ApiError("show_deleted must be hide or show")
+    deleted = show_deleted == "show"
     with read_db() as con:
-        income, expense = reads.build_category_tree(con, 0), reads.build_category_tree(con, 1)
+        income, expense = reads.build_category_tree(con, 0, deleted), reads.build_category_tree(con, 1, deleted)
     return jsonify(ok=True, income=income, expense=expense)
 
 
@@ -1825,21 +1829,37 @@ def v1_transaction(uid):
     return jsonify(ok=True, transaction=tx)
 
 
-@app.route("/api/v1/transactions", methods=["POST"])
-def v1_add_transaction():
-    """Same fields as the add form; type may also be a name, and a missing
-    date means now."""
-    data = dict(_json_body())
+def _v1_add(con, data, lookups=None):
+    """One POST's transaction on con: the add form's fields, type may also
+    be a name, and a missing date means now. Returns (its uid, the
+    transfer's other row's uid or None)."""
+    if not isinstance(data, dict):
+        raise ApiError("each transaction must be an object")
+    data = dict(data)
     data["type"] = _type_code(data.get("type"))
     if data["type"] == "4":
         raise ApiError("add a transfer as type transfer; its mirror row is made for you")
     if not data.get("date"):
         now = datetime.now()
         data["date"], data["time"] = now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S")
+    uid = edits.create_transaction(con, data)
+    return uid, reads.transfer_other_uid(con, uid)
+
+
+@app.route("/api/v1/transactions", methods=["POST"])
+def v1_add_transaction():
+    """One transaction (see _v1_add), or several as {"transactions": [...]},
+    all or none like the batch PATCH. A transfer's other row comes back as
+    mirror."""
+    data = _json_body()
+    if "transactions" in data:
+        return jsonify(ok=True, results=_v1_batch(data["transactions"], "transactions", _v1_add)), 201
     with write_db() as con:
-        uid = edits.create_transaction(con, data)
-        tx = _v1_get_transaction(con, uid)
-    return jsonify(ok=True, transaction=tx), 201
+        uid, mirror_uid = _v1_add(con, data)
+        out = {"ok": True, "transaction": _v1_get_transaction(con, uid)}
+        if mirror_uid:
+            out["mirror"] = _v1_get_transaction(con, mirror_uid)
+    return jsonify(out), 201
 
 
 @app.route("/api/v1/transactions/<uid>", methods=["PATCH"])
@@ -1859,39 +1879,52 @@ def v1_edit_transaction(uid):
 V1_BATCH_LIMIT = 1000
 
 
-@app.route("/api/v1/transactions", methods=["PATCH"])
-def v1_edit_transactions():
-    """Several PATCHes as one: each change is a uid plus what the single
-    PATCH takes, applied in list order, and all of them or none. A refusal
-    lists every change that failed, with the status the single PATCH would
-    have answered."""
-    changes = _json_body().get("changes")
-    if not isinstance(changes, list) or not changes:
-        raise ApiError("send changes, a list of changes")
-    if len(changes) > V1_BATCH_LIMIT:
-        raise ApiError(f"send at most {V1_BATCH_LIMIT} changes at a time")
+def _batch_uid(item):
+    return item.get("uid") if isinstance(item, dict) else None
+
+
+def _v1_batch(items, name, apply, uid_of=lambda item: None):
+    """Several writes as one request: apply(con, item, lookups) -> (uid,
+    other transfer row's uid or None) for each item, in list order, and all
+    of them or none. A refusal lists every item that failed, with its
+    uid_of() and the status the single request would have answered. Returns
+    the results, rows as the whole batch left them."""
+    if not isinstance(items, list) or not items:
+        raise ApiError(f"send {name}, a list of {name}")
+    if len(items) > V1_BATCH_LIMIT:
+        raise ApiError(f"send at most {V1_BATCH_LIMIT} {name} at a time")
     done, errors = [], []
     with write_db() as con:
         lookups = reads.category_lookups(con)
-        for i, change in enumerate(changes):
-            uid = change.get("uid") if isinstance(change, dict) else None
-            # A failed change is undone on its own, so the ones after it are
-            # checked against the rows as the changes before it left them.
-            con.execute("SAVEPOINT change")
+        for i, item in enumerate(items):
+            # A failed item is undone on its own, so the ones after it are
+            # checked against the rows as the items before it left them.
+            con.execute("SAVEPOINT item")
             try:
-                if not isinstance(uid, str):
-                    raise ApiError("each change needs the uid of its transaction")
-                done.append((uid, _v1_apply_change(con, uid, {k: v for k, v in change.items() if k != "uid"},
-                                                   lookups)))
+                done.append(apply(con, item, lookups))
             except edits.EditError as e:
-                con.execute("ROLLBACK TO change")
-                errors.append({"index": i, "uid": uid, "status": e.status, "error": e.message})
-            con.execute("RELEASE change")
+                con.execute("ROLLBACK TO item")
+                errors.append({"index": i, "uid": uid_of(item), "status": e.status, "error": e.message})
+            con.execute("RELEASE item")
         if errors:
-            raise ApiError(f"{len(errors)} of {len(changes)} changes failed; nothing was written", errors=errors)
+            raise ApiError(f"{len(errors)} of {len(items)} {name} failed; nothing was written", errors=errors)
         rows = _v1_get_transactions(con, {u for pair in done for u in pair if u})
-    return jsonify(ok=True, results=[{"transaction": rows[u], **({"mirror": rows[m]} if m else {})}
-                                     for u, m in done])
+    return [{"transaction": rows[u], **({"mirror": rows[m]} if m else {})} for u, m in done]
+
+
+def _v1_batch_change(con, change, lookups):
+    uid = _batch_uid(change)
+    if not isinstance(uid, str):
+        raise ApiError("each change needs the uid of its transaction")
+    return uid, _v1_apply_change(con, uid, {k: v for k, v in change.items() if k != "uid"}, lookups)
+
+
+@app.route("/api/v1/transactions", methods=["PATCH"])
+def v1_edit_transactions():
+    """Several PATCHes as one: each change is a uid plus what the single
+    PATCH takes (see _v1_batch)."""
+    return jsonify(ok=True, results=_v1_batch(_json_body().get("changes"), "changes", _v1_batch_change,
+                                               _batch_uid))
 
 
 @app.route("/api/v1/transactions/<uid>", methods=["DELETE"])

@@ -56,7 +56,7 @@ def test_meta(client):
     assert [(a["uid"], a["currency"], a["hidden"]) for a in d["accounts"]] == [("a1", "cur-eur", False),
                                                                                ("a2", "cur-usd", False)]
     food = next(c for c in d["categories"]["expense"] if c["uid"] == "c-food")
-    assert food["children"] == [{"uid": "c-food-out", "name": "Eating out"}]
+    assert food["children"] == [{"uid": "c-food-out", "name": "Eating out", "deleted": False}]
     assert [c["uid"] for c in d["categories"]["income"]] == ["c-salary"]
 
 
@@ -301,7 +301,7 @@ def test_add_move_and_delete_categories(client):
     child = post(client, "/api/app/categories/1", name="Trains", parent=root).get_json()["uid"]
     tree = get(client, "/api/app/meta")["categories"]["expense"]
     assert [c["name"] for c in tree] == ["Food", "Fun", "Travel"]
-    assert tree[2]["children"] == [{"uid": child, "name": "Trains"}]
+    assert tree[2]["children"] == [{"uid": child, "name": "Trains", "deleted": False}]
     assert post(client, "/api/app/categories/1", name="Food").status_code == 400  # a sibling has it
     patch(client, f"/api/app/categories/1/{root}", move=-1)
     assert [c["name"] for c in get(client, "/api/app/meta")["categories"]["expense"]] == ["Food", "Travel", "Fun"]
