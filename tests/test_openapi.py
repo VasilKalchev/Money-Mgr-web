@@ -46,6 +46,21 @@ def check(spec, r, path, method, status):
     assert not errors, [f"{list(e.absolute_path)}: {e.message}" for e in errors]
 
 
+def request_schema(spec, path, method):
+    schema = spec["paths"][path][method]["requestBody"]["content"]["application/json"]["schema"]
+    return Draft202012Validator({**schema, "components": spec["components"]})
+
+
+def test_request_examples_fit_their_schemas(spec):
+    for path, method in (("/transactions", "patch"), ("/transactions/{uid}", "patch")):
+        media = spec["paths"][path][method]["requestBody"]["content"]["application/json"]
+        assert request_schema(spec, path, method).is_valid(media["example"]), (path, method)
+    batch = request_schema(spec, "/transactions", "patch")
+    assert not batch.is_valid({"changes": [{"note": "no uid"}]})
+    assert not batch.is_valid({"changes": [{"uid": "t1", "bogus": 1}]})
+    assert not request_schema(spec, "/transactions/{uid}", "patch").is_valid({"uid": "t1", "note": "x"})
+
+
 def test_reads_match_spec(spec, api):
     check(spec, api.get("status"), "/status", "get", 200)
     check(spec, api.get("accounts"), "/accounts", "get", 200)
@@ -62,6 +77,8 @@ def test_writes_match_spec(spec, api):
     uid = r.get_json()["transaction"]["uid"]
     check(spec, api.patch(f"transactions/{uid}", {"note": "x", "time": "10:00"}), "/transactions/{uid}", "patch", 200)
     check(spec, api.delete(f"transactions/{uid}"), "/transactions/{uid}", "delete", 200)
+    r = api.patch("transactions", {"changes": [{"uid": "t1", "note": "y", "expect": {"type": "expense"}}, {"uid": "t2", "note": "z"}]})
+    check(spec, r, "/transactions", "patch", 200)
     r = api.post("transactions", {"type": "balance_increase", "account": "a1", "amount": 1, "date": "2025-01-01"})
     check(spec, r, "/transactions", "post", 201)
     assert r.get_json()["transaction"]["category_uid"] == "-4"
@@ -72,6 +89,9 @@ def test_errors_match_spec(spec, api):
     check(spec, api.get("transactions?limit=0"), "/transactions", "get", 400)
     check(spec, api.get("transactions/nope"), "/transactions/{uid}", "get", 404)
     check(spec, api.patch("transactions/t1", {"bogus": 1}), "/transactions/{uid}", "patch", 400)
+    check(spec, api.patch("transactions/t1", {"note": "x", "expect": {"note": "?"}}), "/transactions/{uid}", "patch", 412)
+    r = api.patch("transactions", {"changes": [{"uid": "t1", "note": "x"}, {"uid": "nope", "note": "x"}]})
+    check(spec, r, "/transactions", "patch", 400)
     check(spec, api.get("status", token="mmw_x_y"), "/status", "get", 401)
     ro = users.create_token("alice", "ro")
     check(spec, api.delete("transactions/t1", token=ro), "/transactions/{uid}", "delete", 403)

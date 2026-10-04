@@ -2,6 +2,7 @@ import hmac
 import io
 import ipaddress
 import itertools
+import json
 import os
 import secrets
 import sqlite3
@@ -1399,13 +1400,17 @@ CATEGORY_FIELDS = {"NAME": "name", "ORDERSEQ": "order"}
 
 
 class ApiError(edits.EditError):
-    """A bad API request: answered as {"ok": false, "error": message}, like
-    an edit edits.py refuses."""
+    """A bad API request: answered as {"ok": false, "error": message, **extra},
+    like an edit edits.py refuses."""
+
+    def __init__(self, message, status=400, **extra):
+        super().__init__(message, status)
+        self.extra = extra
 
 
 @app.errorhandler(edits.EditError)
 def _api_error(e):
-    return jsonify(ok=False, error=e.message), e.status
+    return jsonify(ok=False, error=e.message, **getattr(e, "extra", {})), e.status
 
 
 @app.errorhandler(404)
@@ -1572,6 +1577,55 @@ def _v1_get_transaction(uid):
     return _v1_transaction(rows[0], _category_lookups())
 
 
+def _v1_get_transactions(uids):
+    """{uid: transaction} for these uids; missing ones are left out."""
+    uids, lookups, out = list(uids), _category_lookups(), {}
+    for n in range(0, len(uids), 500):
+        part = uids[n:n + 500]
+        for r in query(f"{_V1_TX_SQL} WHERE i.uid IN ({','.join('?' for _ in part)})", part):
+            out[r["uid"]] = _v1_transaction(r, lookups)
+    return out
+
+
+def _same_value(have, want):
+    if isinstance(have, bool) or isinstance(want, bool):
+        return have is want
+    if isinstance(have, (int, float)) and isinstance(want, (int, float)):
+        return abs(have - want) < 1e-9
+    return have == want
+
+
+def _v1_check_expect(con, uid, expect, lookups):
+    """Refuse (412) unless the transaction's fields, as GET shows them, have
+    the values in expect. Read on con, so earlier changes in the same request
+    count."""
+    if not isinstance(expect, dict):
+        raise ApiError("expect must be an object")
+    row = con.execute(_V1_TX_SQL + " WHERE i.uid = ?", (uid,)).fetchone()
+    if not row:
+        raise ApiError("not found", 404)
+    have = _v1_transaction(row, lookups)
+    unknown = set(expect) - set(have)
+    if unknown:
+        raise ApiError(f"can't check: {', '.join(sorted(unknown))}")
+    wrong = [f"{k} is {json.dumps(have[k], ensure_ascii=False)}, not {json.dumps(v, ensure_ascii=False)}"
+             for k, v in expect.items() if not _same_value(have[k], v)]
+    if wrong:
+        raise ApiError("expect not met: " + "; ".join(wrong), 412)
+
+
+def _v1_apply_change(con, uid, change, lookups):
+    """One PATCH's change (its fields, plus expect) on con. Returns the
+    transfer's other row's uid, or None."""
+    data = dict(change)
+    expect = data.pop("expect", None)
+    if "type" in data:
+        data["type"] = _type_code(data["type"])
+    if expect is not None:
+        _v1_check_expect(con, uid, expect, lookups)
+    return edits.update_transaction(con, uid, data)
+
+
 def _time_zone():
     """The server's local time zone, which dates and times are in: its IANA
     name where it can be found (TZ, else /etc/localtime's target), else the
@@ -1678,17 +1732,52 @@ def v1_add_transaction():
 @app.route("/api/v1/transactions/<uid>", methods=["PATCH"])
 def v1_edit_transaction(uid):
     """Change any of edits.TRANSACTION_FIELDS in one go (see
-    edits.update_transaction); type may also be a name. A transfer's other
-    row comes back as mirror."""
-    data = dict(_json_body())
-    if "type" in data:
-        data["type"] = _type_code(data["type"])
+    edits.update_transaction); type may also be a name, and expect holds
+    field values the row must have first. A transfer's other row comes back
+    as mirror."""
     with write_db() as con:
-        mirror_uid = edits.update_transaction(con, uid, data)
+        mirror_uid = _v1_apply_change(con, uid, _json_body(), _category_lookups())
     out = {"ok": True, "transaction": _v1_get_transaction(uid)}
     if mirror_uid:
         out["mirror"] = _v1_get_transaction(mirror_uid)
     return jsonify(out)
+
+
+V1_BATCH_LIMIT = 1000
+
+
+@app.route("/api/v1/transactions", methods=["PATCH"])
+def v1_edit_transactions():
+    """Several PATCHes as one: each change is a uid plus what the single
+    PATCH takes, applied in list order, and all of them or none. A refusal
+    lists every change that failed, with the status the single PATCH would
+    have answered."""
+    changes = _json_body().get("changes")
+    if not isinstance(changes, list) or not changes:
+        raise ApiError("send changes, a list of changes")
+    if len(changes) > V1_BATCH_LIMIT:
+        raise ApiError(f"send at most {V1_BATCH_LIMIT} changes at a time")
+    lookups, done, errors = _category_lookups(), [], []
+    with write_db() as con:
+        for i, change in enumerate(changes):
+            uid = change.get("uid") if isinstance(change, dict) else None
+            # A failed change is undone on its own, so the ones after it are
+            # checked against the rows as the changes before it left them.
+            con.execute("SAVEPOINT change")
+            try:
+                if not isinstance(uid, str):
+                    raise ApiError("each change needs the uid of its transaction")
+                done.append((uid, _v1_apply_change(con, uid, {k: v for k, v in change.items() if k != "uid"},
+                                                   lookups)))
+            except edits.EditError as e:
+                con.execute("ROLLBACK TO change")
+                errors.append({"index": i, "uid": uid, "status": e.status, "error": e.message})
+            con.execute("RELEASE change")
+        if errors:
+            raise ApiError(f"{len(errors)} of {len(changes)} changes failed; nothing was written", errors=errors)
+    rows = _v1_get_transactions({u for pair in done for u in pair if u})
+    return jsonify(ok=True, results=[{"transaction": rows[u], **({"mirror": rows[m]} if m else {})}
+                                     for u, m in done])
 
 
 @app.route("/api/v1/transactions/<uid>", methods=["DELETE"])

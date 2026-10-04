@@ -5,6 +5,15 @@ Notable changes to Money Mgr web. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- API: `PATCH /transactions` changes up to 1000 transactions in one
+  request, in order and all or nothing. A refusal lists every change that
+  failed and why.
+- API: `expect` on a transaction PATCH, the values the transaction must
+  have first, so a script can check and change a row in one call. A
+  mismatch answers 412 and writes nothing.
+
 ### Changed
 
 - Edits made in the pages follow the same rules as the API. Editing either

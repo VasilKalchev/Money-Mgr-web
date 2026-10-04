@@ -285,6 +285,47 @@ paths:
         "403": {$ref: "#/components/responses/ReadOnly"}
         "409": {$ref: "#/components/responses/NoDatabase"}
 
+    patch:
+      tags: [Transactions]
+      operationId: editTransactions
+      summary: Change several transactions at once
+      description: |
+        Up to 1000 changes, each a `uid` plus what a PATCH of
+        `/transactions/{uid}` takes, `expect` included. They're applied in
+        list order, each like that PATCH (mirror handling too), so a
+        transfer's sending row and then its mirror can be in one request,
+        and an `expect` sees the changes before it.
+
+        All or nothing: if any change fails, nothing is written and the 400
+        lists every failing change with its reason and the status a single
+        PATCH would have answered (412 for an `expect` not met).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TransactionBatch"}
+            example:
+              changes:
+                - {uid: "a1f3", amount: 6.14, entered_amount: 12, entered_currency: BGN,
+                   expect: {amount: 12, entered_amount: 12}}
+                - {uid: "b7c2", note: rent}
+      responses:
+        "200":
+          description: Every change made
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TransactionBatchResponse"}
+        "400":
+          description: |
+            Invalid input, or some changes failed and nothing was written.
+            `errors` lists the failing changes.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/BatchError"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/ReadOnly"}
+        "409": {$ref: "#/components/responses/NoDatabase"}
+
   /transactions/{uid}:
     parameters:
       - name: uid
@@ -324,12 +365,16 @@ paths:
         `mirror`. The other row's amount follows when both accounts share a
         currency; across currencies set it with `to_amount` on the sending
         row (or a PATCH of the mirror).
+
+        `expect` makes the change conditional: it holds field values, as
+        GET returns them, that the transaction must have now, or nothing is
+        written and the answer is 412.
       requestBody:
         required: true
         content:
           application/json:
             schema: {$ref: "#/components/schemas/TransactionChanges"}
-            example: {amount: 14, note: lunch with Sam}
+            example: {amount: 14, note: lunch with Sam, expect: {amount: 12.5}}
       responses:
         "200":
           description: Changed
@@ -341,6 +386,7 @@ paths:
         "403": {$ref: "#/components/responses/ReadOnly"}
         "404": {$ref: "#/components/responses/NotFound"}
         "409": {$ref: "#/components/responses/NoDatabase"}
+        "412": {$ref: "#/components/responses/ExpectNotMet"}
     delete:
       tags: [Transactions]
       operationId: deleteTransaction
@@ -596,9 +642,14 @@ components:
           type: [number, string]
 
     TransactionChanges:
-      type: object
       minProperties: 1
-      additionalProperties: false
+      unevaluatedProperties: false
+      allOf:
+        - {$ref: "#/components/schemas/TransactionFields"}
+
+    TransactionFields:
+      type: object
+      description: What a PATCH can change, plus `expect`.
       properties:
         date:
           type: string
@@ -635,6 +686,72 @@ components:
             On the sending row of a transfer: 0 or more, the mirror's amount,
             in the destination account's currency.
           type: [number, string]
+        expect:
+          type: object
+          description: |
+            Field values, named and written as a `Transaction` shows them
+            (`type` by name, `category_uid` for the category), that the
+            transaction must have before the change. Numbers match within
+            rounding error.
+          example: {type: expense, amount: 12.3, entered_amount: 24.06}
+
+    TransactionBatch:
+      type: object
+      required: [changes]
+      properties:
+        changes:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            required: [uid]
+            minProperties: 2
+            unevaluatedProperties: false
+            allOf:
+              - {$ref: "#/components/schemas/TransactionFields"}
+            properties:
+              uid: {type: string}
+
+    TransactionBatchResponse:
+      type: object
+      required: [ok, results]
+      properties:
+        ok: {const: true}
+        results:
+          type: array
+          description: |
+            One per change, in order, with the rows as the whole batch left
+            them.
+          items:
+            type: object
+            required: [transaction]
+            properties:
+              transaction: {$ref: "#/components/schemas/Transaction"}
+              mirror:
+                $ref: "#/components/schemas/Transaction"
+                description: For a transfer, its other row.
+
+    BatchError:
+      type: object
+      required: [ok, error]
+      properties:
+        ok: {const: false}
+        error: {type: string}
+        errors:
+          type: array
+          description: Every change that failed. Missing when the request itself was invalid.
+          items:
+            type: object
+            required: [index, uid, status, error]
+            properties:
+              index:
+                type: integer
+                description: The change's place in `changes`, from 0.
+              uid: {type: [string, "null"]}
+              status:
+                type: integer
+                description: What a single PATCH would have answered (400, 404 or 412).
+              error: {type: string}
 
   responses:
     BadRequest:
@@ -649,6 +766,11 @@ components:
           schema: {$ref: "#/components/schemas/Error"}
     ReadOnly:
       description: A read-only token was used for a write.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    ExpectNotMet:
+      description: The transaction doesn't have the values in `expect`; nothing was written.
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}

@@ -448,3 +448,73 @@ def test_writes_take_the_first_write_backup(api):
     api.patch("transactions/t1", {"note": "x"})
     assert dbstore.store_for("alice").backup_count() == 1
     assert dbstore.store_for("alice").local_modified()
+
+
+# -- expect and batch PATCH ----------------------------------------------------------
+
+def test_patch_expect(api):
+    ok = api.patch("transactions/t1", {"note": "x", "expect": {"type": "expense", "amount": 10, "note": "lunch"}})
+    assert ok.status_code == 200 and row("t1")["ZCONTENT"] == "x"
+    r = api.patch("transactions/t1", {"amount": 11, "expect": {"amount": 10.5, "note": "x"}})
+    assert r.status_code == 412 and r.get_json()["error"] == "expect not met: amount is 10.0, not 10.5"
+    assert row("t1")["AMOUNT_ACCOUNT"] == 10
+    assert api.patch("transactions/t1", {"note": "y", "expect": {"bogus": 1}}).status_code == 400
+    assert api.patch("transactions/t1", {"note": "y", "expect": [1]}).status_code == 400
+    assert api.patch("transactions/nope", {"note": "y", "expect": {"note": "x"}}).status_code == 404
+    assert row("t1")["ZCONTENT"] == "x"
+
+
+def test_batch_patch_applies_in_order(api):
+    mmbak.execute(db_path(), "INSERT INTO ASSETS (NIC_NAME, ORDERSEQ, ZDATA, uid, currencyUid, groupUid) "
+                             "VALUES ('Savings', 3, '0', 'a3', 'cur-eur', 'g1')")
+    tr = api.post("transactions", {"type": "transfer", "account": "a1", "to_account": "a3", "amount": 20}).get_json()
+    sending = tr["transaction"]["uid"]
+    mirror = api.patch(f"transactions/{sending}", {"note": "rent"}).get_json()["mirror"]["uid"]
+    r = api.patch("transactions", {"changes": [
+        {"uid": "t1", "amount": 20, "entered_amount": 39.12, "entered_currency": "USD"},
+        {"uid": "t1", "note": "second", "expect": {"amount": 20, "entered_amount": 39.12}},  # sees the first
+        {"uid": sending, "amount": 25},
+        {"uid": mirror, "description": "d", "expect": {"amount": 25}},  # the sending row's change carried over
+    ]})
+    assert r.status_code == 200, r.get_json()
+    res = r.get_json()["results"]
+    assert [x["transaction"]["uid"] for x in res] == ["t1", "t1", sending, mirror]
+    assert "mirror" not in res[0] and res[2]["mirror"]["uid"] == mirror
+    assert res[0]["transaction"]["note"] == "second"  # rows as the whole batch left them
+    assert (res[3]["transaction"]["amount"], res[3]["transaction"]["description"]) == (25, "d")
+    assert (row("t1")["AMOUNT_ACCOUNT"], float(row("t1")["IN_ZMONEY"]), row("t1")["currencyUid"]) == (20, 39.12, "cur-usd")
+
+
+def test_batch_patch_is_all_or_nothing(api):
+    before = {u: dict(row(u)) for u in ("t1", "t2", "t3")}
+    r = api.patch("transactions", {"changes": [
+        {"uid": "t1", "note": "fine"},
+        {"uid": "nope", "note": "x"},
+        {"uid": "t2", "amount": "abc"},
+        {"uid": "t3", "note": "x", "expect": {"note": "not this"}},
+        {"note": "no uid"},
+        "junk",
+    ]})
+    assert r.status_code == 400
+    d = r.get_json()
+    assert d["error"] == "5 of 6 changes failed; nothing was written"
+    assert [(e["index"], e["uid"], e["status"]) for e in d["errors"]] == [
+        (1, "nope", 404), (2, "t2", 400), (3, "t3", 412), (4, None, 400), (5, None, 400)]
+    assert d["errors"][1]["error"] == "invalid amount"
+    assert {u: dict(row(u)) for u in before} == before
+
+
+@pytest.mark.parametrize("body", [{}, {"changes": []}, {"changes": {"uid": "t1"}}, {"changes": "t1"}])
+def test_batch_patch_rejects(api, body):
+    assert api.patch("transactions", body).status_code == 400
+
+
+def test_batch_patch_limit(api):
+    assert api.patch("transactions", {"changes": [{"uid": "t1", "note": "x"}] * 1001}).status_code == 400
+    r = api.patch("transactions", {"changes": [{"uid": "t1", "note": str(i)} for i in range(1000)]})
+    assert r.status_code == 200 and row("t1")["ZCONTENT"] == "999"
+
+
+def test_batch_patch_needs_a_write_token(api):
+    ro = users.create_token("alice", "ro")
+    assert api.patch("transactions", {"changes": [{"uid": "t1", "note": "x"}]}, token=ro).status_code == 403
