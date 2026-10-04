@@ -11,5 +11,9 @@ throttling are per-process), so don't add workers.
 
 `.github/workflows/ci.yml` runs the tests, builds the image and checks
 `/healthz` answers, then publishes it to GHCR (`edge` from `main`, semver
-tags and `latest` from `v*` tags; amd64 and arm64). Release by pushing a
-`vX.Y.Z` tag; the tag becomes `VERSION`/`MMW_VERSION`.
+tags and `latest` from `v*` tags; amd64 and arm64). The app's version is
+`pyproject.toml`'s; `VERSION`/`MMW_VERSION` (shown in the page header) is
+that for a `vX.Y.Z` tag, `X.Y.Z-edge+<commit>` otherwise, and a local run
+shows `X.Y.Z-dev`. Release by bumping `pyproject.toml`, moving the
+changelog's `[Unreleased]` under the new version, and pushing a `vX.Y.Z`
+tag; CI fails a tag that doesn't match `pyproject.toml`.

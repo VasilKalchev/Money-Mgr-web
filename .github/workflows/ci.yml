@@ -40,6 +40,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The version the app shows: the release for a v* tag (which must match
+      # pyproject's), otherwise pyproject's plus "-edge+<commit>".
+      - id: version
+        run: |
+          py=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            [ "${GITHUB_REF_NAME#v}" = "$py" ] || { echo "tag $GITHUB_REF_NAME doesn't match pyproject.toml's $py"; exit 1; }
+            v=$py
+          else
+            v="$py-edge+${GITHUB_SHA::7}"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - id: meta
         uses: docker/metadata-action@v6
         with:
@@ -51,9 +64,11 @@ jobs:
             type=semver,pattern={{major}}
             type=ref,event=pr
             type=sha,format=short
-          # Keep the Dockerfile's, not the repo name and its empty description.
+          # Keep the Dockerfile's, not the repo name and its empty description,
+          # and the app's version rather than the tag ("edge" on main).
           labels: |
             org.opencontainers.image.title=MMW
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.description=Money Mgr web: a self-hosted viewer/editor for Money Manager .mmbak backups
 
       - uses: docker/setup-qemu-action@v4
@@ -67,7 +82,7 @@ jobs:
           load: true
           tags: mmw:ci
           build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
+            VERSION=${{ steps.version.outputs.version }}
             BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -101,7 +116,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
+            VERSION=${{ steps.version.outputs.version }}
             BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
