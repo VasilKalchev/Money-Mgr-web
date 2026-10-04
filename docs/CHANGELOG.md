@@ -18,6 +18,14 @@ Notable changes to Money Mgr web. The format follows
 - API: `GET /transactions` filters by `transfer_id` (repeatable), to find
   the other row of a transfer.
 
+### Fixed
+
+- Sync no longer deletes transactions, categories or accounts that are
+  missing from the app's backup. The app never removes these rows (it
+  marks them deleted), so a missing row is one the app never got, for
+  example when the last synced file wasn't restored on the phone. The
+  review lists them as "not in the app", and they are kept and sent back.
+
 ## [1.3.0] - 2026-10-04
 
 ### Added

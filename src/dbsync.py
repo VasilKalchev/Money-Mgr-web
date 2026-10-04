@@ -365,7 +365,8 @@ def _summary(counts):
     parts = []
     for (table, what), n in sorted(counts.items(), key=lambda i: (i[0][0] != merge.TX, i[0][0], CHANGE_ORDER[i[0][1]])):
         one, many = TABLE_NAMES.get(table, (f"{table} row", f"{table} rows"))
-        parts.append(f"{n} {CHANGE_WORDS[what]} {one if n == 1 else many}")
+        noun, word = one if n == 1 else many, CHANGE_WORDS[what]
+        parts.append(f"{n} {noun} {word}" if what == "missing" else f"{n} {word} {noun}")
     return ", ".join(parts)
 
 
@@ -566,8 +567,9 @@ QUIET_COLUMNS = merge.TIMESTAMP_COLUMNS | {"SYNCTIME", "SYNCVERSION", "ISSYNCED"
 # The INOUTCOME columns behind the transaction table's columns.
 TX_SHOWN = {"WDATE", "ZDATE", "DO_TYPE", "assetUid", "toAssetUid", "ctgUid", "AMOUNT_ACCOUNT", "ZCONTENT", "ZDATA",
             "IS_DEL"}
-CHANGE_ORDER = {"added": 0, "changed": 1, "restored": 2, "deleted": 3}
-CHANGE_WORDS = {"added": "new", "changed": "changed", "restored": "restored", "deleted": "deleted"}
+CHANGE_ORDER = {"added": 0, "missing": 1, "changed": 2, "restored": 3, "deleted": 4}
+CHANGE_WORDS = {"added": "new", "missing": "not in the app", "changed": "changed", "restored": "restored",
+                "deleted": "deleted"}
 
 
 def _tx_was(old, new):

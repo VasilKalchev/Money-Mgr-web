@@ -12,6 +12,8 @@ which differ between copies. For every row:
   sides is a conflict for the user to settle; last-write timestamps just
   keep the later value.
 - deleted on one side and edited on the other: a conflict
+- missing from the app's snapshot in a table the app only soft-deletes
+  from (SOFT_DELETE_TABLES): kept, since the app never had it
 
 Transactions added on both sides that look like the same purchase entered
 twice (same account, amount, date, ...) are offered as possible duplicates.
@@ -38,6 +40,11 @@ KEY_COLUMNS = {"ZCATEGORY": ("uid", "TYPE")}
 # rather than calling it a conflict.
 TIMESTAMP_COLUMNS = {"UTIME", "A_UTIME", "C_UTIME", "E_UTIME", "USETIME", "MODIFY_DATE"}
 TX = "INOUTCOME"
+# Tables the app deletes from by setting a flag (IS_DEL, C_IS_DEL, an
+# account's ZDATA status), never by removing the row. A row in the base but
+# missing from the app's snapshot was never in the app (it restored an
+# older file than the last push), so it's kept and goes back to the app.
+SOFT_DELETE_TABLES = {TX, "ZCATEGORY", "ASSETS"}
 # Columns that hold one value between them and so merge as a unit: taking
 # WDATE from one side and ZDATE from the other leaves the date and the
 # timestamp days apart. If both sides changed the group differently, every
@@ -197,7 +204,8 @@ def _item_id(prefix, *parts):
 class Conflict:
     """A row both sides changed incompatibly. kind: "edit" (a column changed
     differently on both sides, or differs at all without a base),
-    "edit_delete" (edited here, deleted in the app), "delete_edit" (deleted
+    "edit_delete" (edited here, deleted in the app; never in
+    SOFT_DELETE_TABLES), "delete_edit" (deleted
     here, edited in the app), or "table" (an unkeyed table changed on both
     sides). fields: [(column, base, local, remote)] for the columns at
     issue."""
@@ -243,8 +251,9 @@ class Plan:
         self.replace = {}
         self.conflicts = []
         self.duplicates = []
-        # table -> side ("remote"/"local") -> what ("added"/"changed"/"deleted") -> [key]:
+        # table -> side ("remote"/"local") -> what ("added"/"changed"/"deleted"/"missing") -> [key]:
         # what each side did since the base, conflicting changes included.
+        # "missing" (local only): kept here, though not in the app's snapshot.
         self.changes = defaultdict(lambda: {"remote": defaultdict(list), "local": defaultdict(list)})
         self.schema_problems = schema_problems(local, remote)
         if base is not None and schema_problems(local, base):
@@ -282,6 +291,9 @@ class Plan:
                     rch["changed"].append(k)
                 lch["deleted"].append(k)
             elif r is None:
+                if name in SOFT_DELETE_TABLES:
+                    lch["missing"].append(k)
+                    continue
                 if l == b:
                     self.deletes[name].add(k)
                 else:

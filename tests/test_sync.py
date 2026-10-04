@@ -169,6 +169,22 @@ def test_review_lists_what_each_side_changed(client, store, export):
     assert local(store, "t2")["AMOUNT_ACCOUNT"] == 30 and local(store, "t4")["IS_DEL"] == 1
 
 
+def test_rows_the_app_never_got_are_kept(client, store, export):
+    """A backup from an app that didn't restore the last push lacks rows
+    the base has: they're listed as not in the app and kept, not deleted."""
+    app = export()
+    execute(app, "DELETE FROM INOUTCOME WHERE uid IN ('t2', 't3')")
+    add_tx(app, "app1")
+    upload(client, app)
+    v = dbsync.review(store)
+    assert v["from_app"] == "1 new transaction" and v["from_here"] == "2 transactions not in the app"
+    assert {t["what"] for t in v["changes"]["local"]["transactions"]} == {"missing"}
+    html, _, _ = review_form(client)
+    assert "Nothing conflicts" in html and 'class="badge change-missing">not in the app<' in html
+    accept(client)
+    assert local(store, "t2")["IS_DEL"] == 0 and local(store, "t3") and local(store, "app1")
+
+
 def test_changes_point_at_conflicts_and_duplicates(client, store, export):
     patch(client, "t1", "ZCONTENT", "mine")
     add_here(client)
@@ -259,22 +275,22 @@ def test_review_submitted_after_the_db_changed_is_refused(client, store, export)
 
 
 def test_problem_blocks_until_fixed(client, store, export):
-    mine = add_here(client, category="c-fun")
+    mine = add_here(client, account="a2")  # in USD, a2's currency
     app = export()
-    execute(app, "UPDATE INOUTCOME SET ctgUid = 'c-food' WHERE ctgUid = 'c-fun'")
-    execute(app, "DELETE FROM ZCATEGORY WHERE uid = 'c-fun'")
+    execute(app, "UPDATE ASSETS SET currencyUid = 'cur-eur' WHERE uid = 'a2'")
+    execute(app, "DELETE FROM CURRENCY WHERE uid = 'cur-usd'")
     upload(client, app)
     html, fp, _ = review_form(client)
     assert "Fix these first (1)" in html and "which was deleted in the app" in html
     assert re.search(r'<button type="submit" class="btn-primary"\s+disabled', html)
     r = apply(client, fp)
     assert r.status_code == 409 and "Fix the problems" in r.get_data(as_text=True)
-    patch(client, mine, "ctgUid", "c-food")  # fixed here
+    assert client.delete(f"/api/transactions/{mine}", headers=client.csrf).status_code == 200  # fixed here
     html, fp, _ = review_form(client)
     assert "Fix these first" not in html
     apply(client, fp)
-    assert local(store, mine)["ctgUid"] == "c-food" and store.load_pending() is None
-    assert not query(store.db_path, "SELECT 1 FROM ZCATEGORY WHERE uid = 'c-fun'")
+    assert local(store, mine)["IS_DEL"] == 1 and store.load_pending() is None
+    assert not query(store.db_path, "SELECT 1 FROM CURRENCY WHERE uid = 'cur-usd'")
 
 
 def test_cancel_and_replace(client, store, export):

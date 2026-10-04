@@ -137,23 +137,59 @@ def test_timestamps_keep_the_later_value(dbs):
     assert tx(out, "t1")["UTIME"] == 900 and tx(out, "t2")["UTIME"] == 950
 
 
+def add_group(dbs):
+    """An account group "g2" in every copy: a table the app may delete rows
+    from, unlike INOUTCOME (merge.SOFT_DELETE_TABLES)."""
+    for path in (dbs.base, dbs.local, dbs.remote):
+        execute(path, "INSERT INTO ASSETGROUP (ACC_GROUP_NAME, ORDERSEQ, TYPE, uid) VALUES ('Cards', 2, 11, 'g2')")
+
+
+def group(path, uid):
+    rows = query(path, "SELECT * FROM ASSETGROUP WHERE uid = ?", (uid,))
+    return rows[0] if rows else None
+
+
 def test_app_deleting_an_untouched_row_deletes_it(dbs):
-    execute(dbs.remote, "DELETE FROM INOUTCOME WHERE uid = 't2'")
+    add_group(dbs)
+    execute(dbs.remote, "DELETE FROM ASSETGROUP WHERE uid = 'g2'")
     p = dbs.plan()
-    assert not p.needs_review() and p.changes[merge.TX]["remote"]["deleted"] == [("t2",)]
-    assert tx(dbs.merged(p), "t2") is None
+    assert not p.needs_review() and p.changes["ASSETGROUP"]["remote"]["deleted"] == [("g2",)]
+    assert group(dbs.merged(p), "g2") is None
 
 
 def test_app_deleting_a_row_edited_here_is_a_conflict(dbs):
+    add_group(dbs)
+    execute(dbs.remote, "DELETE FROM ASSETGROUP WHERE uid = 'g2'")
+    execute(dbs.local, "UPDATE ASSETGROUP SET ACC_GROUP_NAME = 'Keep me' WHERE uid = 'g2'")
+    p = dbs.plan()
+    (c,) = p.conflicts
+    assert c.kind == "edit_delete" and c.fields == [("ACC_GROUP_NAME", "Cards", "Keep me", None)]
+    # Both sides' changes are listed, conflicting or not.
+    assert p.changes["ASSETGROUP"]["remote"]["deleted"] == p.changes["ASSETGROUP"]["local"]["changed"] == [("g2",)]
+    assert group(dbs.merged(p, {c.id: "local"}), "g2")["ACC_GROUP_NAME"] == "Keep me"
+    assert group(dbs.merged(p, {c.id: "remote"}), "g2") is None
+
+
+@pytest.mark.parametrize("table, where", [("INOUTCOME", "uid = 't2'"), ("ZCATEGORY", "uid = 'c-fun'"),
+                                          ("ASSETS", "uid = 'a2'")])
+def test_rows_missing_from_the_app_are_kept(dbs, table, where):
+    """The app soft-deletes transactions, categories and accounts, so a row
+    missing from its snapshot is one it never got (it restored an older
+    file than the last push), not one it deleted."""
+    execute(dbs.remote, f"DELETE FROM {table} WHERE {where}")
+    p = dbs.plan()
+    assert not p.needs_review() and not p.deletes
+    (key,) = p.changes[table]["local"]["missing"]
+    assert not p.changes[table]["remote"]
+    assert query(dbs.merged(p), f"SELECT * FROM {table} WHERE {where}")
+
+
+def test_missing_from_the_app_and_edited_here_is_kept_with_the_edit(dbs):
     execute(dbs.remote, "DELETE FROM INOUTCOME WHERE uid = 't2'")
     execute(dbs.local, "UPDATE INOUTCOME SET ZCONTENT = 'keep me' WHERE uid = 't2'")
     p = dbs.plan()
-    (c,) = p.conflicts
-    assert c.kind == "edit_delete" and c.fields == [("ZCONTENT", "dinner", "keep me", None)]
-    # Both sides' changes are listed, conflicting or not.
-    assert p.changes[merge.TX]["remote"]["deleted"] == p.changes[merge.TX]["local"]["changed"] == [("t2",)]
-    assert tx(dbs.merged(p, {c.id: "local"}), "t2")["ZCONTENT"] == "keep me"
-    assert tx(dbs.merged(p, {c.id: "remote"}), "t2") is None
+    assert not p.conflicts and p.changes[merge.TX]["local"]["missing"] == [("t2",)]
+    assert tx(dbs.merged(p), "t2")["ZCONTENT"] == "keep me"
 
 
 def test_row_deleted_here_but_edited_in_app_is_a_conflict(dbs):
@@ -288,15 +324,15 @@ def test_transfer_does_not_match_an_expense(dbs):
 
 # -- problems -------------------------------------------------------------------
 
-def test_new_transaction_in_a_category_the_app_deleted(dbs):
-    execute(dbs.remote, "UPDATE INOUTCOME SET ctgUid = 'c-food' WHERE ctgUid = 'c-fun'")
-    execute(dbs.remote, "DELETE FROM ZCATEGORY WHERE uid = 'c-fun'")
-    add_tx(dbs.local, "mine", ctg="c-fun")
+def test_new_transaction_in_a_currency_the_app_deleted(dbs):
+    execute(dbs.remote, "UPDATE ASSETS SET currencyUid = 'cur-eur' WHERE uid = 'a2'")
+    execute(dbs.remote, "DELETE FROM CURRENCY WHERE uid = 'cur-usd'")
+    add_tx(dbs.local, "mine", currencyUid="cur-usd")
     p = dbs.plan()
     res = p.resolve({})
-    assert p.problems(res) == [("category", "INOUTCOME", ("mine",), "c-fun")]
-    # fixed here: the transaction moves to another category
-    execute(dbs.local, "UPDATE INOUTCOME SET ctgUid = 'c-food' WHERE uid = 'mine'")
+    assert p.problems(res) == [("currency", "INOUTCOME", ("mine",), "cur-usd")]
+    # fixed here: the transaction moves to another currency
+    execute(dbs.local, "UPDATE INOUTCOME SET currencyUid = 'cur-eur' WHERE uid = 'mine'")
     p = dbs.plan()
     assert not p.problems(p.resolve({}))
 
@@ -310,16 +346,15 @@ def test_app_transaction_in_an_account_deleted_here(dbs):
 
 
 def test_transfer_left_with_one_leg(dbs):
-    add_transfer(dbs.base, "tr")
+    # Without a base, each leg's IS_DEL is a conflict of its own.
     add_transfer(dbs.local, "tr")
     add_transfer(dbs.remote, "tr")
-    execute(dbs.remote, "DELETE FROM INOUTCOME WHERE uid = 'tr-in'")
-    execute(dbs.remote, "DELETE FROM INOUTCOME WHERE uid = 'tr-out'")
-    execute(dbs.local, "UPDATE INOUTCOME SET ZCONTENT = 'edited' WHERE uid = 'tr-out'")
-    p = dbs.plan()
-    (c,) = p.conflicts  # tr-out: edited here, deleted in the app; tr-in just goes
-    assert p.problems(p.resolve({c.id: "local"})) == [("transfer", "INOUTCOME", ("tr-pair",), ("3",))]
-    assert not p.problems(p.resolve({c.id: "remote"}))
+    execute(dbs.remote, "UPDATE INOUTCOME SET IS_DEL = 1 WHERE uid IN ('tr-in', 'tr-out')")
+    p = dbs.plan(base=False)
+    c = {c.key: c.id for c in p.conflicts}
+    out, in_ = c[("tr-out",)], c[("tr-in",)]
+    assert p.problems(p.resolve({out: "local", in_: "remote"})) == [("transfer", "INOUTCOME", ("tr-pair",), ("3",))]
+    assert not p.problems(p.resolve({out: "remote", in_: "remote"}))
 
 
 def test_broken_references_both_sides_already_had_are_ignored(dbs):

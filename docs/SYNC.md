@@ -53,6 +53,12 @@ file alongside. A snapshot that changes nothing is applied right away.
   backup descends from it. `merge.choose_base()` picks the closest
   candidate, and the base on a tie, since a wrong pushed base would read
   the app's backup as reverting local changes.
+- The app only soft-deletes transactions, categories and accounts
+  (`IS_DEL`, `C_IS_DEL`, `ASSETS.ZDATA`). In those tables
+  (`merge.SOFT_DELETE_TABLES`) a row in the base but missing from the
+  app's snapshot is one the app never got (it restored an older file
+  than the last push), so it's kept and listed as "not in the app"
+  (`missing`), not deleted.
 - Installs from before sync have no base: `_ensure_base()` uses the
   unedited working db or re-downloads the installed Drive file; failing
   both, the merge is two-way (every differing row is a conflict).
