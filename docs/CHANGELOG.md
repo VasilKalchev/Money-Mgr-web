@@ -5,8 +5,11 @@ Notable changes to Money Mgr web. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-04
+
 ### Added
 
+- The version shows in the page header and under Settings > About.
 - Delete transactions from the Transactions page, one at a time or in bulk
   with the row checkboxes. Deletes are staged like other edits and written
   on Save. Like in the app, they are soft-deleted and a transfer goes with
