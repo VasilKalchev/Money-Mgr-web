@@ -1,6 +1,6 @@
 [project]
 name = "mmw"
-version = "1.2.0"
+version = "1.3.0"
 description = "Money Mgr web: a self-hosted viewer/editor for Money Manager .mmbak backups"
 readme = "README.md"
 license = "MIT"

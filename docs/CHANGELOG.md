@@ -5,6 +5,8 @@ Notable changes to Money Mgr web. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-04
+
 ### Added
 
 - A new app at `/`, laid out like Money Manager on the phone and
