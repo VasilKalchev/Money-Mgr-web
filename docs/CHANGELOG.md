@@ -5,6 +5,8 @@ Notable changes to Money Mgr web. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-04
+
 ### Added
 
 - API: `PATCH /transactions` changes up to 1000 transactions in one
