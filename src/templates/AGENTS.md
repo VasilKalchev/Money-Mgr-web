@@ -26,6 +26,7 @@ accounts.
   in `localStorage`) is on. Add `adv-active` server-side when the control
   holds a non-default value so an applied filter is never invisible.
 - Inline edits (`patchField`, `patchAmount`, etc.) PATCH `/api/...` endpoints
-  and only ever touch fields in the corresponding `*_FIELDS` allowlist in
-  `app.py` (`TRANSACTION_FIELDS`, `ACCOUNT_FIELDS`, `CATEGORY_FIELDS`,
-  `BULK_TRANSACTION_FIELDS`).
+  naming an MM column, which must be in the matching `*_FIELDS` map in
+  `app.py` (`TRANSACTION_FIELDS`, `ACCOUNT_FIELDS`, `CATEGORY_FIELDS`). The
+  route maps it to a field in `src/edits.py`, which checks the value. Bulk
+  edits stage one PATCH per row.

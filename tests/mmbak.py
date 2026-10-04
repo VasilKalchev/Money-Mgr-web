@@ -25,8 +25,8 @@ CREATE TABLE ASSETGROUP (DEVICE_ID INTEGER PRIMARY KEY autoincrement, ACC_GROUP_
   ORDERSEQ INTEGER, uid TEXT);
 CREATE TABLE CURRENCY (ID integer primary key autoincrement, ISO varchar, RATE real,
   DECIMAL_POINT integer, uid TEXT);
-CREATE TABLE ZCATEGORY (ID integer primary key autoincrement, C_IS_DEL integer, NAME varchar,
-  ORDERSEQ integer, TYPE integer, STATUS integer, uid TEXT, pUid TEXT);
+CREATE TABLE ZCATEGORY (ID integer primary key autoincrement, C_IS_DEL integer, C_UTIME INTEGER,
+  NAME varchar, ORDERSEQ integer, TYPE integer, STATUS integer, uid TEXT, pUid TEXT);
 """
 
 # uid, WDATE, DO_TYPE (0 income, 1 expense, 4 mirror), amount, account, category,

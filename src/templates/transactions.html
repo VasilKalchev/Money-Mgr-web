@@ -308,6 +308,8 @@
       <td data-col="account" title="assetUid = {{ r.account_uid }}">
         {% if r.DO_TYPE == '3' %}
           <span class="muted">{{ r.account_name }} &rarr; {{ r.to_account_name }}</span>
+        {% elif r.DO_TYPE == '4' %}
+          <span class="muted">{{ r.account_name }} &larr; {{ r.to_account_name }}</span>
         {% else %}
           <select onchange="patchField('/api/transactions/{{ r.uid }}', 'assetUid', this.value, this)">
             {% for a in accounts %}

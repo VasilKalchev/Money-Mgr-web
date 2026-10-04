@@ -2,8 +2,10 @@
 
 ## Modules
 
-- `app.py`: all routes, SQL, and helpers, including login/CSRF hooks and
-  the user admin routes. No blueprints/models.
+- `app.py`: all routes, the read SQL, and helpers, including login/CSRF
+  hooks and the user admin routes. No blueprints/models.
+- `edits.py`: every write to the MM database outside sync (transactions,
+  accounts, categories). Both APIs call it; see "Writing to the database".
 - `dbstore.py`: where data lives: `DATA_DIR` (`MMW_DATA_DIR` env, `/config`
   in the image), app-wide `app.json`, and `Store`, one user's
   `config.json`, managed database, schema-version validation,
@@ -57,9 +59,13 @@ user created.
 - `/api/v1/...`: the public API, documented in `docs/openapi.yaml`; keep
   it in step (`tests/test_openapi.py` checks the spec against the routes
   and their responses) and don't make breaking changes to the API. It reuses the page code
-  (`parse_transaction_filters`, `_create_transaction`, `_amount_columns`,
-  `get_account_rows`). Raise `ApiError(message, status)` for bad input;
-  it's answered as `{"ok": false, "error": ...}`, as are 404/405 under `/api/`.
+  (`parse_transaction_filters`, `get_account_rows`, and `edits` for writes).
+  Raise `ApiError(message, status)` for bad input; it's answered as
+  `{"ok": false, "error": ...}`, as are `edits.EditError`s and 404/405
+  under `/api/`.
+- Both are thin: they parse the request, call `edits`, and shape the
+  answer. The pages' routes map the MM column a page names
+  (`TRANSACTION_FIELDS` etc.) to the `edits` field.
 
 ## Supported databases
 
@@ -75,11 +81,24 @@ version only after checking its schema against `docs/MM_DB_SCHEMA.md`.
   default; pass `readonly=False` for writes (this also triggers the
   one-time backup).
 - `query(sql, params)`: read helper, returns `fetchall()`.
-- `execute(sql, params)`: write helper, commits and closes.
+- `write_db()`: a writable connection for one edit, committed when the
+  `with` block ends and discarded if it raises.
 - Row factory is `sqlite3.Row`, so results are accessed by column name.
 - Filter bars build SQL dynamically with parallel `filters` (SQL fragments)
   and `params` (bound values) lists, joined with `AND`. See `/transactions`
   in `app.py` for the pattern to follow when adding new filters.
+
+## Writing to the database
+
+Every write outside sync goes through `edits.py`, with a connection from
+`write_db()`: `create_transaction`, `update_transaction`,
+`delete_transaction`, `update_account` and `update_category`. They take
+named fields (`note`, `amount`, `name`, ...), never columns, and keep the
+rules the app relies on: `WDATE` and `ZDATE` together, a transfer's two
+rows in step, `IN_ZMONEY`/`ZMONEY` restated with the amount, categories
+from the row's tree, unique sibling category names, and the last-write
+time (`UTIME`, `A_UTIME`, `C_UTIME`) bumped. Add a new kind of edit there,
+not in a route. `edits.py` doesn't import Flask; it raises `EditError`.
 
 ## Key schema gotchas (see docs/MM_DB_SCHEMA.md for full detail)
 

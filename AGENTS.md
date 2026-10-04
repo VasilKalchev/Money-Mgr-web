@@ -20,8 +20,9 @@ itself (`MM*.mmbak` files, `docs/MM_DB_SCHEMA.md`).
 Each area has its own `AGENTS.md` with the details; read the one for the
 area you are working in.
 
-- `src/` - the Python backend: `app.py` (all routes, SQL, auth/CSRF),
-  `dbstore.py`, `users.py`, `gdrive.py`, `merge.py`, `dbsync.py`.
+- `src/` - the Python backend: `app.py` (all routes, read SQL, auth/CSRF),
+  `edits.py` (every write to the MM database outside sync), `dbstore.py`,
+  `users.py`, `gdrive.py`, `merge.py`, `dbsync.py`.
   See `src/AGENTS.md`.
   - `src/templates/` - Jinja2 pages and the frontend conventions.
     See `src/templates/AGENTS.md`.

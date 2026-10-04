@@ -1,4 +1,5 @@
-"""The write routes: allowlists, amount restating, transfers, first-write backup."""
+"""The write routes and the edits module behind them: allowlists, amount
+restating, transfers, accounts and categories, first-write backup."""
 import io
 import sqlite3
 
@@ -55,7 +56,7 @@ def test_edit_disallowed_field_is_rejected(client, field):
 def test_page_edits_bump_the_last_write_time(client):
     patch(client, "/api/transactions/t1", field="ZCONTENT", value="x")
     patch(client, "/api/transactions/t2/datetime", date="2024-02-12", time="10:00")
-    patch(client, "/api/transactions/bulk", field="ZDATA", value="y", uids=["t3"])
+    patch(client, "/api/transactions/t3", field="ZDATA", value="y")
     assert all(db_row(client, u)["UTIME"] > 1000 for u in ("t1", "t2", "t3"))
     assert db_row(client, "t4")["UTIME"] == 3
 
@@ -95,7 +96,7 @@ def test_amount_edit_restates_money_columns(client):
     assert row["AMOUNT_ACCOUNT"] == 500
     assert float(row["IN_ZMONEY"]) == 500  # keeps the entered/account ratio (1:1 here)
     assert float(row["ZMONEY"]) == pytest.approx(450.0)
-    assert float(d["zmoney"]) == pytest.approx(450.0)
+    assert d["ok"]
     assert row["UTIME"] > 1000
 
 
@@ -119,24 +120,96 @@ def test_amount_edit_unknown_row(client):
     assert patch(client, "/api/transactions/nope", field="AMOUNT_ACCOUNT", value="5").status_code == 404
 
 
-# -- bulk -----------------------------------------------------------------------
+# -- the same rules as the API ------------------------------------------------------
 
-def test_bulk_edit(client):
-    r = patch(client, "/api/transactions/bulk", field="ctgUid", value="c-fun", uids=["t1", "t2"])
-    assert r.get_json()["updated"] == 2
-    assert db_row(client, "t1")["ctgUid"] == "c-fun" and db_row(client, "t2")["ctgUid"] == "c-fun"
-    assert db_row(client, "t3")["ctgUid"] == "c-salary"
+def add_transfer(path):
+    mmbak.add_tx(path, "x3", do_type="3", asset="a1", ctg="", note="rent", txUidTrans="tr", toAssetUid="a2")
+    mmbak.add_tx(path, "x4", do_type="4", asset="a2", ctg="", note="rent", txUidTrans="tr", toAssetUid="a1")
 
 
-@pytest.mark.parametrize("body", [
-    {"field": "AMOUNT_ACCOUNT", "value": "1", "uids": ["t1"]},  # allowed singly, not in bulk
-    {"field": "ctgUid", "value": "x", "uids": []},
-    {"field": "ctgUid", "value": "x", "uids": "t1"},
-    {"field": "ctgUid", "value": "x"},
+def test_page_edit_of_a_transfer_carries_over_to_its_other_row(client):
+    add_transfer(dbstore.store_for("alice").db_path)
+    assert patch(client, "/api/transactions/x4", field="ZCONTENT", value="flat").status_code == 200
+    patch(client, "/api/transactions/x3/datetime", date="2025-05-06", time="07:08:09")
+    a, b = db_row(client, "x3"), db_row(client, "x4")
+    assert a["ZCONTENT"] == b["ZCONTENT"] == "flat"
+    assert (a["WDATE"], a["ZDATE"]) == (b["WDATE"], b["ZDATE"]) == ("2025-05-06", a["ZDATE"])
+
+
+def test_page_cannot_move_a_transfer_leg_to_another_account(client):
+    add_transfer(dbstore.store_for("alice").db_path)
+    assert patch(client, "/api/transactions/x4", field="assetUid", value="a1").status_code == 400
+    assert db_row(client, "x4")["assetUid"] == "a2"
+
+
+def test_page_category_must_fit_the_row(client):
+    assert patch(client, "/api/transactions/t1", field="ctgUid", value="c-salary").status_code == 400  # income tree
+    assert patch(client, "/api/transactions/t1", field="ctgUid", value="nope").status_code == 400
+    assert patch(client, "/api/transactions/t1", field="ctgUid", value="c-fun").status_code == 200
+    assert db_row(client, "t1")["ctgUid"] == "c-fun"
+
+
+def test_refused_edit_writes_nothing(client):
+    before = dict(db_row(client, "t1"))
+    r = client.patch("/api/v1/transactions/t1", json={"note": "x", "amount": "abc"}, headers=client.csrf)
+    assert r.status_code == 400
+    assert dict(db_row(client, "t1")) == before
+
+
+# -- accounts and categories ------------------------------------------------------
+
+def test_account_edits(client):
+    assert patch(client, "/api/accounts/a1", field="ZDATA", value="3").status_code == 200
+    assert patch(client, "/api/accounts/a1", field="ORDERSEQ", value="20").status_code == 200
+    assert patch(client, "/api/accounts/a1", field="NIC_NAME", value="  Purse ").status_code == 200
+    row = db_row(client, "a1", "ASSETS")
+    assert (row["ZDATA"], row["ORDERSEQ"], row["NIC_NAME"]) == ("3", 20, "Purse")
+    assert row["A_UTIME"] > 1000
+
+
+@pytest.mark.parametrize("field, value", [
+    ("NIC_NAME", ""), ("NIC_NAME", "  "), ("NIC_NAME", None), ("ZDATA", "5"), ("ZDATA", ""),
+    ("ORDERSEQ", "x"), ("ORDERSEQ", "-1"), ("ORDERSEQ", "1.5"), ("groupUid", "nope"),
 ])
-def test_bulk_edit_rejects(client, body):
-    assert patch(client, "/api/transactions/bulk", **body).status_code == 400
-    assert db_row(client, "t1")["ctgUid"] == "c-food"
+def test_account_edit_rejects(client, field, value):
+    before = dict(db_row(client, "a1", "ASSETS"))
+    assert patch(client, "/api/accounts/a1", field=field, value=value).status_code == 400
+    assert dict(db_row(client, "a1", "ASSETS")) == before
+
+
+def test_account_edit_unknown(client):
+    assert patch(client, "/api/accounts/nope", field="NIC_NAME", value="x").status_code == 404
+
+
+def test_category_edits(client):
+    assert patch(client, "/api/categories/c-food-out/1", field="NAME", value="Fun").status_code == 200  # a root's name
+    assert patch(client, "/api/categories/c-food-out/1", field="ORDERSEQ", value="10").status_code == 200
+    row = db_row(client, "c-food-out", "ZCATEGORY")
+    assert (row["NAME"], row["ORDERSEQ"]) == ("Fun", 10) and row["C_UTIME"] > 1000
+
+
+def test_category_name_must_be_unique_among_its_siblings(client):
+    path = dbstore.store_for("alice").db_path
+    mmbak.execute(path, "INSERT INTO ZCATEGORY (NAME, ORDERSEQ, TYPE, STATUS, uid, pUid) "
+                        "VALUES ('Groceries', 3, 1, 2, 'c-groc', 'c-food')")
+    mmbak.execute(path, "INSERT INTO ZCATEGORY (C_IS_DEL, NAME, ORDERSEQ, TYPE, STATUS, uid) "
+                        "VALUES (1, 'Old', 4, 1, 0, 'c-old')")
+    assert patch(client, "/api/categories/c-fun/1", field="NAME", value="Food").status_code == 400
+    assert patch(client, "/api/categories/c-groc/1", field="NAME", value="Eating out").status_code == 400
+    assert patch(client, "/api/categories/c-fun/1", field="NAME", value="Salary").status_code == 200  # other tree
+    assert patch(client, "/api/categories/c-fun/1", field="NAME", value="Old").status_code == 200  # deleted one
+    assert db_row(client, "c-groc", "ZCATEGORY")["NAME"] == "Groceries"
+
+
+@pytest.mark.parametrize("url, field, value, status", [
+    ("/api/categories/c-fun/1", "NAME", "", 400),
+    ("/api/categories/c-fun/1", "ORDERSEQ", "x", 400),
+    ("/api/categories/c-fun/0", "NAME", "x", 404),  # c-fun is in the expense tree
+    ("/api/categories/nope/1", "NAME", "x", 404),
+])
+def test_category_edit_rejects(client, url, field, value, status):
+    assert patch(client, url, field=field, value=value).status_code == status
+    assert db_row(client, "c-fun", "ZCATEGORY")["NAME"] == "Fun"
 
 
 # -- datetime -------------------------------------------------------------------

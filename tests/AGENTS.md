@@ -13,7 +13,7 @@ Add a test next to the code you change:
 - `test_users.py`: accounts, throttling
 - `test_dbstore.py`: install, backups
 - `test_filters.py`: /transactions filters
-- `test_edits.py`: PATCH/POST write routes, upload
+- `test_edits.py`: the pages' write routes and `edits.py`, upload
 - `test_gdrive.py`: OAuth and Drive I/O, `requests` faked
 - `test_merge.py`: the merge engine
 - `test_sync.py`: sync flows and routes, against the in-memory Drive in

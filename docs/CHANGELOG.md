@@ -5,6 +5,17 @@ Notable changes to Money Mgr web. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Edits made in the pages follow the same rules as the API. Editing either
+  row of a transfer (note, description, date, time, amount) updates the
+  other row too, and a transfer's receiving row no longer offers an account
+  to move it to. A category must belong to the row's income or expense
+  tree.
+- Account and category edits are checked: names can't be empty, an
+  account's status and order must be valid, and a category can't take the
+  name of another one beside it in the tree.
+
 ## [1.1.0] - 2026-10-04
 
 ### Added
