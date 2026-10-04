@@ -208,13 +208,13 @@ paths:
           in: query
           description: |
             Only rows changed at or after this Unix time in milliseconds
-            (`updated_ms`). Every write here sets it. Rows that come in from
-            the app at a sync keep the time they were changed in the app,
-            which can be before the sync, so after a sync (`database.mtime`
-            in `/status` changes) read again from before the previous sync.
+            (`updated_ms`): when MMW saw the change, whether it was made here
+            or came in from the app at a sync. Reading from the time of the
+            last read sees every change, synced ones included.
           schema: {type: integer, minimum: 0}
         - name: sort
           in: query
+          description: '`updated` sorts by `updated_ms`.'
           schema: {type: string, enum: [date, amount, entered_amount, account, updated], default: date}
         - name: dir
           in: query
@@ -526,7 +526,7 @@ components:
       type: object
       required: [uid, type, date, time, timestamp_ms, amount, currency, entered_amount, entered_currency,
                  account_uid, account, to_account_uid, to_account, category_uid, category, note, description,
-                 transfer_id, deleted, updated_ms]
+                 transfer_id, deleted, updated_ms, app_updated_ms]
       properties:
         uid: {type: string}
         type:
@@ -571,7 +571,16 @@ components:
         deleted: {type: boolean}
         updated_ms:
           type: [integer, "null"]
-          description: Last change, Unix time in milliseconds.
+          description: |
+            When MMW saw the row change, Unix time in milliseconds: set by
+            every write here and by every sync or upload that changes the
+            row, whichever side made the change. A row unchanged since MMW
+            got it has the app's own time (`app_updated_ms`).
+        app_updated_ms:
+          type: [integer, "null"]
+          description: |
+            The app's own last-change time (`UTIME`), which a sync carries
+            over from the phone, so it can be from before the sync.
 
     TransactionResponse:
       type: object

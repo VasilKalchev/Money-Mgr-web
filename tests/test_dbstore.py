@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 import dbstore
+import mmbak
 from dbstore import Store, UnsupportedDatabase
 
 
@@ -175,3 +176,14 @@ def test_adopt_legacy_data_noops(data_dir):
     open(os.path.join(dbstore.user_dir("alice"), "config.json"), "w").write("{}")
     assert dbstore.adopt_legacy_data("alice") is False  # user already has data
     assert (data_dir / "config.json").exists()
+
+
+def test_stamp_changes_marks_rows_that_differ(data_dir, make_mmbak):
+    store = dbstore.store_for("alice")
+    old, new = make_mmbak(), make_mmbak()
+    mmbak.execute(new, "UPDATE INOUTCOME SET ZCONTENT = 'x' WHERE uid = 't1'")
+    mmbak.execute(new, "DELETE FROM INOUTCOME WHERE uid = 't2'")
+    mmbak.add_tx(new, "t9")
+    store.stamp_changes(old, new)
+    rows = mmbak.query(store.changes_path, f"SELECT uid FROM {dbstore.CHANGES_TABLE} ORDER BY uid")
+    assert [r["uid"] for r in rows] == ["t1", "t2", "t9"]

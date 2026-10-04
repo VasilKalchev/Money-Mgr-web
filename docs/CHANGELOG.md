@@ -16,6 +16,11 @@ Notable changes to Money Mgr web. The format follows
 
 ### Changed
 
+- API: a transaction's `updated_ms`, and `updated_since` and
+  `sort=updated` with it, are now when MMW saw the row change, including
+  rows that came in from the app at a sync. Before, a synced row kept the
+  time it changed on the phone, so a client reading incrementally could
+  miss it. The app's own time is `app_updated_ms`.
 - Edits made in the pages follow the same rules as the API. Editing either
   row of a transfer (note, description, date, time, amount) updates the
   other row too, and a transfer's receiving row no longer offers an account

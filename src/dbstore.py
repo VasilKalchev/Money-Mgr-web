@@ -32,6 +32,7 @@ import shutil
 import sqlite3
 import tempfile
 import threading
+import time
 from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -56,6 +57,11 @@ SUPPORTED_USER_VERSIONS = {19}
 # candidate bases for the next sync; see Store.base_candidates().
 PUSHED_KEEP = 3
 INCOMING_NAME = "incoming.mmbak"
+# MMW's own change time per transaction (see Store.stamp_changes), in
+# changes.sqlite beside the working db. The name is unique so that the
+# connections it's attached to (as "mmw") can name it unqualified, as
+# triggers must.
+CHANGES_TABLE = "mmw_changes"
 
 _app_lock = threading.RLock()
 
@@ -210,6 +216,7 @@ class Store:
         self.pushed_dir = os.path.join(self.sync_dir, "pushed")
         self.incoming_path = os.path.join(self.sync_dir, INCOMING_NAME)
         self.pending_path = os.path.join(self.sync_dir, "pending.json")
+        self.changes_path = os.path.join(root, "changes.sqlite")
         self._lock = threading.RLock()
         self._backed_up = False
 
@@ -239,7 +246,44 @@ class Store:
         os.close(fd)
         return path
 
+    # -- MMW's change times -------------------------------------------------
+
+    def ensure_changes(self):
+        """Create the change log if it isn't there yet."""
+        if os.path.isfile(self.changes_path):
+            return
+        os.makedirs(self.root, exist_ok=True)
+        con = sqlite3.connect(self.changes_path)
+        try:
+            con.execute(f"CREATE TABLE IF NOT EXISTS {CHANGES_TABLE} (uid TEXT PRIMARY KEY, changed INTEGER NOT NULL)")
+            con.commit()
+        finally:
+            con.close()
+
+    def stamp_changes(self, old_db, new_db):
+        """Record now (Unix ms, server clock) as the change time of every
+        transaction that differs between old_db and new_db: added, changed
+        or gone. A row synced from the app keeps the app's UTIME, which can
+        be from before the sync, so clients reading incrementally go by
+        this instead; API writes stamp their rows themselves (app.write_db).
+        Rows never stamped go by their UTIME."""
+        old, new = _transactions(old_db), _transactions(new_db)
+        changed = [uid for uid in old.keys() | new.keys() if old.get(uid) != new.get(uid)]
+        if not changed:
+            return
+        self.ensure_changes()
+        now = int(time.time() * 1000)
+        con = sqlite3.connect(self.changes_path)
+        try:
+            con.executemany(f"INSERT OR REPLACE INTO {CHANGES_TABLE} (uid, changed) VALUES (?, ?)",
+                            [(uid, now) for uid in changed])
+            con.commit()
+        finally:
+            con.close()
+
     def _swap_in(self, staged):
+        if self.db_exists():
+            self.stamp_changes(self.db_path, staged)
         for suffix in ("-journal", "-wal", "-shm"):
             try:
                 os.remove(self.db_path + suffix)
@@ -469,6 +513,17 @@ class Store:
 
 
 _stores = {}
+
+
+def _transactions(path):
+    """{uid: {column: value}} of a database's INOUTCOME rows."""
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        cur = con.execute("SELECT * FROM INOUTCOME")
+        cols = [d[0] for d in cur.description]
+        return {row["uid"]: row for row in (dict(zip(cols, r)) for r in cur) if row.get("uid")}
+    finally:
+        con.close()
 
 
 def user_dir(username):

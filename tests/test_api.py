@@ -211,6 +211,7 @@ def test_transaction_fields(api):
         "account_uid": "a1", "account": "Wallet", "to_account_uid": None, "to_account": None,
         "category_uid": "c-food-out", "category": "Food > Eating out",
         "note": "dinner", "description": "", "transfer_id": None, "deleted": False, "updated_ms": 1,
+        "app_updated_ms": 1,
     }
     assert t["time"] == datetime.fromtimestamp(1704067201).strftime("%H:%M:%S")
 
@@ -410,7 +411,51 @@ def test_list_updated_since(api):
     api.patch("transactions/t2", {"note": "changed"})
     d = api.get(f"transactions?updated_since={since}").get_json()
     assert [t["uid"] for t in d["transactions"]] == ["t2"] and d["total"] == 1
+    assert d["transactions"][0]["updated_ms"] >= since
     assert api.get("transactions?updated_since=x").status_code == 400
+
+
+def stamped():
+    con = sqlite3.connect(dbstore.store_for("alice").changes_path)
+    try:
+        return dict(con.execute(f"SELECT uid, changed FROM {dbstore.CHANGES_TABLE}"))
+    finally:
+        con.close()
+
+
+def test_a_refused_edit_stamps_nothing(api):
+    assert api.patch("transactions/t2", {"amount": -1}).status_code == 400
+    assert "t2" not in stamped()
+
+
+def install_changed_copy(tmp_path, sql, params=()):
+    """Install a copy of the working db with sql applied, as a sync from
+    the app would (the copy keeps the app's own UTIME)."""
+    store = dbstore.store_for("alice")
+    staged = store.staging_path()
+    dbstore.copy_db(store.db_path, staged)
+    mmbak.execute(staged, sql, params)
+    store.install_db(staged, "gdrive", "MM.mmbak")
+
+
+def test_rows_synced_from_the_app_count_from_when_mmw_got_them(api, tmp_path):
+    # Changed in the app long before the sync: UTIME 5, older than any read.
+    since = int(datetime.now().timestamp() * 1000)
+    install_changed_copy(tmp_path, "UPDATE INOUTCOME SET ZCONTENT = 'from the phone', UTIME = 5 WHERE uid = 't3'")
+    d = api.get(f"transactions?updated_since={since}").get_json()
+    assert [t["uid"] for t in d["transactions"]] == ["t3"]
+    t = d["transactions"][0]
+    assert t["updated_ms"] >= since and t["app_updated_ms"] == 5
+    # sort=updated goes by it too: t3 comes first despite its old UTIME.
+    first = api.get("transactions?sort=updated&dir=desc").get_json()["transactions"][0]
+    assert first["uid"] == "t3"
+
+
+def test_rows_deleted_in_the_app_show_up_as_changed(api, tmp_path):
+    since = int(datetime.now().timestamp() * 1000)
+    install_changed_copy(tmp_path, "UPDATE INOUTCOME SET IS_DEL = 1 WHERE uid = 't1'")
+    d = api.get(f"transactions?updated_since={since}&show_deleted=show").get_json()
+    assert [(t["uid"], t["deleted"]) for t in d["transactions"]] == [("t1", True)]
 
 
 def test_status_has_the_time_zone(api, monkeypatch):

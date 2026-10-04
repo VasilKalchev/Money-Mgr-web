@@ -7,6 +7,7 @@ import os
 import secrets
 import sqlite3
 import sys
+import time
 import tomllib
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -84,15 +85,21 @@ def current_db_mtime():
 
 
 def get_db(readonly=True):
+    """A connection to the user's working database, with MMW's change log
+    attached as "mmw" (see dbstore.Store.stamp_changes)."""
     db_path = current_db_path()
+    store = current_store()
+    store.ensure_changes()
     if not readonly:
         # Safety net for any write path that bypasses _require_db().
         check_db_supported(db_path)
     if readonly:
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        con.execute("ATTACH DATABASE ? AS mmw", (f"file:{store.changes_path}?mode=ro",))
     else:
-        current_store().backup_once()
+        store.backup_once()
         con = sqlite3.connect(db_path)
+        con.execute("ATTACH DATABASE ? AS mmw", (store.changes_path,))
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = OFF")
     return con
@@ -110,9 +117,16 @@ def query(sql, params=(), readonly=True):
 def write_db():
     """A writable connection for one edit (see edits.py), committed when the
     block finishes and discarded if it raises, so a refused edit writes
-    nothing."""
+    nothing. Every transaction row it adds or changes gets MMW's change
+    time in the same commit."""
     con = get_db(readonly=False)
     try:
+        now = int(time.time() * 1000)
+        con.create_function("mmw_now_ms", 0, lambda: now)
+        for event in ("INSERT", "UPDATE"):
+            con.execute(f"CREATE TEMP TRIGGER mmw_stamp_{event.lower()} AFTER {event} ON main.INOUTCOME BEGIN "
+                        f"INSERT OR REPLACE INTO {dbstore.CHANGES_TABLE} (uid, changed) "
+                        f"VALUES (NEW.uid, mmw_now_ms()); END")
         con.execute("BEGIN IMMEDIATE")
         yield con
         con.commit()
@@ -1499,9 +1513,15 @@ TX_TYPE_NAMES = {
 TX_TYPE_CODES = {name: code for code, name in TX_TYPE_NAMES.items()}
 ACCOUNT_STATUS_NAMES = {"0": "normal", "1": "deleted", "3": "hidden"}
 
-_V1_TX_SQL = """
+# When MMW saw a row change: its stamp in the change log, or the app's
+# UTIME for a row never stamped (dbstore.Store.stamp_changes).
+_V1_CHANGED = "COALESCE(ch.changed, CAST(i.UTIME AS INTEGER))"
+_V1_CHANGES_JOIN = f"LEFT JOIN mmw.{dbstore.CHANGES_TABLE} ch ON ch.uid = i.uid"
+V1_SORT_OPTIONS = {**TX_SORT_OPTIONS, "updated": _V1_CHANGED + " {dir}"}
+
+_V1_TX_SQL = f"""
     SELECT i.uid, i.WDATE, i.ZDATE, i.DO_TYPE, i.IS_DEL, i.AMOUNT_ACCOUNT, i.IN_ZMONEY,
-           i.ZCONTENT, i.ZDATA, i.ctgUid, i.txUidTrans, i.UTIME,
+           i.ZCONTENT, i.ZDATA, i.ctgUid, i.txUidTrans, i.UTIME, {_V1_CHANGED} AS changed_ms,
            time(CAST(i.ZDATE AS INTEGER) / 1000, 'unixepoch', 'localtime') AS tx_time,
            cu.ISO AS currency_iso, acu.ISO AS account_currency_iso,
            a.uid AS account_uid, a.NIC_NAME AS account_name,
@@ -1511,6 +1531,7 @@ _V1_TX_SQL = """
     LEFT JOIN ASSETS ta    ON ta.uid = i.toAssetUid
     LEFT JOIN CURRENCY cu  ON cu.uid = i.currencyUid
     LEFT JOIN CURRENCY acu ON acu.uid = a.currencyUid
+    {_V1_CHANGES_JOIN}
 """
 
 
@@ -1562,7 +1583,8 @@ def _v1_transaction(r, lookups):
         "description": r["ZDATA"] or "",
         "transfer_id": r["txUidTrans"] or None,
         "deleted": r["IS_DEL"] not in (None, 0, "0", ""),
-        "updated_ms": _num_or_none(r["UTIME"], int),
+        "updated_ms": _num_or_none(r["changed_ms"], int),
+        "app_updated_ms": _num_or_none(r["UTIME"], int),
     }
 
 
@@ -1688,19 +1710,19 @@ def v1_transactions():
     where, params = f["build_where"]()
     updated_since = _int_arg("updated_since", None, 0)
     if updated_since is not None:
-        where += " AND CAST(i.UTIME AS INTEGER) >= ?"
+        where += f" AND {_V1_CHANGED} >= ?"
         params.append(updated_since)
     limit = _int_arg("limit", 100, 1, 1000)
     offset = _int_arg("offset", 0, 0)
     sort_by = request.args.get("sort", "date")
     sort_dir = request.args.get("dir", "desc")
-    if sort_by not in TX_SORT_OPTIONS:
-        raise ApiError(f"sort must be one of: {', '.join(TX_SORT_OPTIONS)}")
+    if sort_by not in V1_SORT_OPTIONS:
+        raise ApiError(f"sort must be one of: {', '.join(V1_SORT_OPTIONS)}")
     if sort_dir not in ("asc", "desc"):
         raise ApiError("dir must be asc or desc")
-    total = query(f"SELECT COUNT(*) AS n FROM INOUTCOME i WHERE {where}", params)[0]["n"]
+    total = query(f"SELECT COUNT(*) AS n FROM INOUTCOME i {_V1_CHANGES_JOIN} WHERE {where}", params)[0]["n"]
     rows = query(
-        f"{_V1_TX_SQL} WHERE {where} ORDER BY {TX_SORT_OPTIONS[sort_by].format(dir=sort_dir)}, i.uid LIMIT ? OFFSET ?",
+        f"{_V1_TX_SQL} WHERE {where} ORDER BY {V1_SORT_OPTIONS[sort_by].format(dir=sort_dir)}, i.uid LIMIT ? OFFSET ?",
         params + [limit, offset],
     )
     lookups = _category_lookups()

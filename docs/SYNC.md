@@ -60,6 +60,13 @@ file alongside. A snapshot that changes nothing is applied right away.
 - Columns that hold one value between them (`merge.COLUMN_GROUPS`:
   `WDATE` + `ZDATE`) merge as a unit: both come from the same side, and a
   conflict covers the whole group.
+- MMW's change times: a synced row keeps the app's `UTIME`, which can be
+  from before the sync, so `changes.sqlite` (beside the user's `db/`)
+  records when MMW saw each transaction change. `Store._swap_in()` stamps
+  every row that differs between the working db and the one replacing it
+  (sync, replace, upload), and `app.write_db()` stamps the rows an edit
+  writes. The API's `updated_ms`/`updated_since` read it, falling back to
+  `UTIME`. It lives outside the MM file, so it never reaches the app.
 
 ## OAuth
 

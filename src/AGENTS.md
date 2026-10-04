@@ -79,10 +79,13 @@ version only after checking its schema against `docs/MM_DB_SCHEMA.md`.
 
 - `get_db(readonly=True)` opens the SQLite file in read-only URI mode by
   default; pass `readonly=False` for writes (this also triggers the
-  one-time backup).
+  one-time backup). Either way MMW's change log (`changes.sqlite`, table
+  `mmw_changes`, see `docs/SYNC.md`) is attached as `mmw`.
 - `query(sql, params)`: read helper, returns `fetchall()`.
 - `write_db()`: a writable connection for one edit, committed when the
-  `with` block ends and discarded if it raises.
+  `with` block ends and discarded if it raises. Temp triggers stamp every
+  `INOUTCOME` row it inserts or updates in the change log, in the same
+  commit.
 - Row factory is `sqlite3.Row`, so results are accessed by column name.
 - Filter bars build SQL dynamically with parallel `filters` (SQL fragments)
   and `params` (bound values) lists, joined with `AND`. See `/transactions`
