@@ -96,6 +96,36 @@ def test_same_column_changed_both_sides_is_a_conflict(dbs):
     assert (remote["ZCONTENT"], remote["ZDATA"], remote["ctgUid"]) == ("theirs", "desc here", "c-fun")
 
 
+DAY_MS = 86_400_000
+
+
+def test_date_and_timestamp_never_come_from_different_sides(dbs):
+    """WDATE and ZDATE merge as one value: a date moved on one side and only
+    ZDATE touched on the other is one conflict over both, not WDATE from
+    one side and ZDATE from the other (rows ending up days apart)."""
+    zdate = int(tx(dbs.base, "t1")["ZDATE"])
+    execute(dbs.local, "UPDATE INOUTCOME SET WDATE = '2024-01-08', ZDATE = ? WHERE uid = 't1'", (str(zdate + 3 * DAY_MS),))
+    execute(dbs.remote, "UPDATE INOUTCOME SET ZDATE = ? WHERE uid = 't1'", (str(zdate + 5000),))
+    p = dbs.plan()
+    (c,) = p.conflicts
+    assert {f[0] for f in c.fields} == {"WDATE", "ZDATE"}
+    remote = tx(dbs.merged(p, {c.id: "remote"}), "t1")
+    local = tx(dbs.merged(p, {c.id: "local"}), "t1")
+    assert (remote["WDATE"], remote["ZDATE"]) == ("2024-01-05", str(zdate + 5000))
+    assert (local["WDATE"], local["ZDATE"]) == ("2024-01-08", str(zdate + 3 * DAY_MS))
+
+
+def test_date_changed_on_one_side_comes_over_whole(dbs):
+    zdate = int(tx(dbs.base, "t1")["ZDATE"])
+    execute(dbs.remote, "UPDATE INOUTCOME SET WDATE = '2024-01-07', ZDATE = ? WHERE uid = 't1'", (str(zdate + 2 * DAY_MS),))
+    execute(dbs.local, "UPDATE INOUTCOME SET WDATE = '2024-01-06' WHERE uid = 't2'")
+    execute(dbs.remote, "UPDATE INOUTCOME SET ZDATE = '1' WHERE uid = 't2'")
+    p = dbs.plan()
+    assert [c.key for c in p.conflicts] == [("t2",)]  # each side changed half of t2's date
+    t1 = tx(dbs.merged(p), "t1")
+    assert (t1["WDATE"], t1["ZDATE"]) == ("2024-01-07", str(zdate + 2 * DAY_MS))
+
+
 def test_timestamps_keep_the_later_value(dbs):
     execute(dbs.local, "UPDATE INOUTCOME SET UTIME = 500, ZCONTENT = 'x' WHERE uid = 't1'")
     execute(dbs.remote, "UPDATE INOUTCOME SET UTIME = 900, ctgUid = 'c-fun' WHERE uid = 't1'")

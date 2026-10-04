@@ -38,6 +38,12 @@ KEY_COLUMNS = {"ZCATEGORY": ("uid", "TYPE")}
 # rather than calling it a conflict.
 TIMESTAMP_COLUMNS = {"UTIME", "A_UTIME", "C_UTIME", "E_UTIME", "USETIME", "MODIFY_DATE"}
 TX = "INOUTCOME"
+# Columns that hold one value between them and so merge as a unit: taking
+# WDATE from one side and ZDATE from the other leaves the date and the
+# timestamp days apart. If both sides changed the group differently, every
+# column in it that differs is in the one conflict, so a decision takes the
+# whole group from one side.
+COLUMN_GROUPS = {TX: [("WDATE", "ZDATE")]}
 # Columns that tie a transfer's two legs and its fee row together.
 TX_LINK_COLUMNS = ("txUidTrans", "txUidFee")
 DUPLICATE_THRESHOLD = 6.5
@@ -289,7 +295,26 @@ class Plan:
         cols = self.local.tables[name].cols
         update, clash = {}, []
         local_changed = remote_changed = False
+        upper = [c.upper() for c in cols]
+        grouped = set()
+        for group in COLUMN_GROUPS.get(name, ()):
+            g = [upper.index(c.upper()) for c in group if c.upper() in upper]
+            grouped.update(g)
+            lg, rg = [l[i] for i in g], [r[i] for i in g]
+            bg = None if b is None else [b[i] for i in g]
+            if lg == rg:
+                if bg is not None and lg != bg:
+                    local_changed = remote_changed = True
+            elif lg == bg:
+                update.update({i: r[i] for i in g if l[i] != r[i]})
+                remote_changed = True
+            elif rg == bg:
+                local_changed = True
+            else:
+                clash += [(cols[i], None if b is None else b[i], l[i], r[i]) for i in g if l[i] != r[i]]
         for i, (lv, rv) in enumerate(zip(l, r)):
+            if i in grouped:
+                continue
             if lv == rv:
                 if b is not None and lv != b[i]:
                     local_changed = remote_changed = True
@@ -308,6 +333,7 @@ class Plan:
         if update:
             self.updates[name][k] = update
         if clash:
+            clash.sort(key=lambda f: cols.index(f[0]))
             self._conflict(name, k, "edit", clash)
         if b is not None:
             if remote_changed or clash:

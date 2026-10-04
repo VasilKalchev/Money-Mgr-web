@@ -180,3 +180,21 @@ def test_no_database_redirects_to_setup(data_dir):
         s.update(user="bob", ver=1, csrf="t")
     assert "/setup" in c.get("/transactions").headers["Location"]
     assert c.get("/api/transactions/uids").status_code == 409
+
+
+# -- version -------------------------------------------------------------------
+
+def test_every_page_header_shows_the_version(client):
+    import app as appmod
+    for url in ("/transactions", "/settings"):
+        assert f'class="muted app-version" title="Version">{appmod.VERSION}<' in client.get(url).get_data(as_text=True)
+
+
+def test_version_falls_back_to_pyproject_for_a_local_run(monkeypatch):
+    import app as appmod
+    monkeypatch.delenv("MMW_VERSION", raising=False)
+    assert appmod._app_version().endswith("-dev") and appmod._app_version()[0].isdigit()
+    monkeypatch.setenv("MMW_VERSION", "dev")
+    assert appmod._app_version().endswith("-dev")
+    monkeypatch.setenv("MMW_VERSION", "v2.3.4")
+    assert appmod._app_version() == "v2.3.4"

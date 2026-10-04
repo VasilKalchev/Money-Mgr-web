@@ -54,6 +54,7 @@
     gap: 16px;
   }
   header h1 { font-size: 16px; margin: 0; margin-right: 4px; }
+  header h1 .app-version { font-size: 11px; font-weight: 400; }
   header .db-controls { display: flex; align-items: center; gap: 10px; margin-right: auto; }
   .db-source { font-size: 12px; padding: 6px 10px; max-width: 420px; display: flex; align-items: center; gap: 8px; }
   .db-source .db-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -148,6 +149,7 @@
   .cell-saved { background: var(--saved) !important; transition: background 1.2s ease; }
   .cell-pending, input.cell-pending, select.cell-pending { background: rgba(217,164,65,.18) !important; outline: 1px solid var(--pending); }
   tr.cell-pending td { background: rgba(217,164,65,.10); }
+  tr.pending-delete td { text-decoration: line-through; opacity: .6; }
   .group-diff { color: #e0c93d; font-weight: 700; margin-left: 4px; }
   tr.group-a td { background: var(--panel); }
   tr.group-b td { background: var(--panel-alt); }
@@ -258,7 +260,7 @@
 </head>
 <body>
 <header>
-  <h1>Money Mgr web</h1>
+  <h1>Money Mgr web <small class="muted app-version" title="Version">{{ app_version }}</small></h1>
   <div class="db-controls">
     {% if user %}
     <a href="/settings" class="btn-secondary db-source" title="Database source and sync (Settings)">
@@ -504,7 +506,7 @@ function renderSaveBar() {
   btn.style.display = pending.length ? 'inline-block' : 'none';
 }
 
-function stageChange({ url, field, value, el, label, fieldLabel, oldValue, payload }) {
+function stageChange({ url, field, value, el, label, fieldLabel, oldValue, payload, method }) {
   const key = url + '::' + field;
   let pending = getPending();
   const idx = pending.findIndex(p => p.key === key);
@@ -513,7 +515,7 @@ function stageChange({ url, field, value, el, label, fieldLabel, oldValue, paylo
     if (el) el.classList.remove('cell-pending');
   } else {
     const entry = {
-      key, url, field, value,
+      key, url, field, value, method,
       payload: payload || { field, value },
       label: label || '',
       fieldLabel: fieldLabel || FIELD_LABELS[field] || field,
@@ -573,10 +575,11 @@ async function confirmSave() {
   try {
     while (remaining.length) {
       const p = remaining[0];
+      const method = p.method || 'PATCH';
       const res = await fetch(p.url, {
-        method: 'PATCH',
+        method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(p.payload),
+        body: method === 'DELETE' ? undefined : JSON.stringify(p.payload),
       });
       const data = await res.json();
       if (!data.ok) throw new Error(`${p.label} / ${p.fieldLabel}: ${data.error || 'save failed'}`);
@@ -589,6 +592,13 @@ async function confirmSave() {
     alert('Save stopped: ' + e.message + `\n${remaining.length} change(s) still pending.`);
     btn.disabled = false;
   }
+}
+
+function markPendingDelete(row, on) {
+  row.classList.toggle('cell-pending', on);
+  row.classList.toggle('pending-delete', on);
+  const btn = row.querySelector('.delete-btn');
+  if (btn) btn.textContent = on ? 'Undo delete' : 'Delete';
 }
 
 function findElementForKey(url, field) {
@@ -609,6 +619,12 @@ function findElementForKey(url, field) {
 function reapplyPending() {
   const pending = getPending();
   pending.forEach(p => {
+    if (p.method === 'DELETE') {
+      const m = p.url.match(/\/api\/transactions\/([^/]+)$/);
+      const row = m && document.querySelector(`tr[data-uid="${CSS.escape(m[1])}"]`);
+      if (row) markPendingDelete(row, true);
+      return;
+    }
     if (p.field === 'datetime') {
       const m = p.url.match(/\/api\/transactions\/([^/]+)\/datetime/);
       if (!m) return;

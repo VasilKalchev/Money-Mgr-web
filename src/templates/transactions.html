@@ -202,6 +202,7 @@
     </select>
     <span id="bulk-value-widgets"></span>
     <button type="button" class="btn-primary" onclick="applyBulkEdit()">Apply to selected</button>
+    <button type="button" class="btn-secondary" onclick="stageDeleteSelected()">Delete selected</button>
   </div>
 </div>
 
@@ -285,6 +286,7 @@
       <th class="amount" data-col="entered" data-default-hidden="1" title="INOUTCOME.IN_ZMONEY: the amount as originally entered, in the transaction's own currency (currencyUid) &mdash; before conversion to AMOUNT_ACCOUNT">Entered Amount</th>
       <th data-col="uid" data-default-hidden="1" title="INOUTCOME.uid, the real primary key">UID</th>
       <th class="nowrap" data-col="updated" data-default-hidden="1" title="INOUTCOME.UTIME: last-write timestamp, epoch ms">Updated</th>
+      <th></th>
     </tr>
   </thead>
   <tbody>
@@ -292,7 +294,7 @@
     <tr data-uid="{{ r.uid }}" data-account="{{ r.account_uid }}" data-zdate="{{ r.zdate_ms }}" data-wdate="{{ r.WDATE }}"
         data-label="{{ r.WDATE }} {{ r.tx_time }} &middot; {{ r.ZCONTENT or r.category_path or (r.account_name ~ ' transaction') }}"
         title="INOUTCOME.uid={{ r.uid }} | DO_TYPE={{ r.DO_TYPE }}{{ ' | IS_DEL=' ~ r.is_del if r.is_del and r.is_del != 0 }}"
-        {{ 'style="opacity:.55"' if r.is_del and r.is_del != 0 }}>
+        {{ 'style="opacity:.55" data-deleted="1"'|safe if r.is_del and r.is_del != 0 }}>
       <td><input type="checkbox" class="row-select" data-uid="{{ r.uid }}"></td>
       <td class="nowrap" data-col="date" title="WDATE (text date) = {{ r.WDATE }}">
         <span class="js-date-display" tabindex="0"></span>
@@ -359,6 +361,11 @@
       </td>
       <td class="nowrap" data-col="updated" title="UTIME (local)">
         <span class="muted">{{ r.updated_str or '' }}</span>
+      </td>
+      <td class="nowrap">
+        {% if not r.is_del or r.is_del == 0 %}
+        <button type="button" class="btn-secondary delete-btn" title="Delete this transaction (staged until you click Save)" onclick="toggleDelete(this.closest('tr'))">Delete</button>
+        {% endif %}
       </td>
     </tr>
     {% endfor %}
@@ -904,6 +911,39 @@ function applyBulkEdit() {
   });
   clearSelection();
   if (skipped > 0) alert(`${skipped} row(s) were skipped (not editable for this field, e.g. transfers/adjustments, or a category from the wrong income/expense tree).`);
+}
+
+// Delete is staged like any other edit and written on Save, as a soft delete
+// (like the app): the rows stay, flagged deleted, and sync carries it over. A
+// transfer goes with its other leg and fee.
+function deleteStageArgs(uid, label) {
+  return {
+    url: `/api/transactions/${uid}`, field: 'IS_DEL', value: 'Delete', method: 'DELETE',
+    label: label || uid, fieldLabel: 'Delete', oldValue: '',
+  };
+}
+
+function toggleDelete(row) {
+  const pending = getPending().some(p => p.key === `/api/transactions/${row.dataset.uid}::IS_DEL`);
+  // Staging the old value again drops the entry, which is the undo.
+  stageChange({ ...deleteStageArgs(row.dataset.uid, row.dataset.label), value: pending ? '' : 'Delete' });
+  markPendingDelete(row, !pending);
+}
+
+function stageDeleteSelected() {
+  const uids = Array.from(selectedUids);
+  if (uids.length === 0) return;
+  if (selectAllMode && !confirm(
+    `WARNING: this stages the deletion of ALL ${uids.length} rows matching your current filters -- ` +
+    `across every page, not just what's shown here. Nothing is written until you review and click Save. Continue?`
+  )) return;
+  uids.forEach(uid => {
+    const row = document.querySelector(`tr[data-uid="${CSS.escape(uid)}"]`);
+    if (row && row.dataset.deleted) return;
+    stageChange(deleteStageArgs(uid, row && row.dataset.label));
+    if (row) markPendingDelete(row, true);
+  });
+  clearSelection();
 }
 
 onBulkFieldChange();

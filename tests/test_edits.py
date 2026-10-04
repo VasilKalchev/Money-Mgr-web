@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 import dbstore
+import mmbak
 
 
 def db_row(client, uid, table="INOUTCOME"):
@@ -42,13 +43,21 @@ def test_edit_allowed_field(client):
     assert db_row(client, "t2")["ZCONTENT"] == "dinner"  # only the one row
 
 
-@pytest.mark.parametrize("field", ["uid", "IS_DEL", "DO_TYPE", "ZCONTENT = 'x', IS_DEL", "1; DROP TABLE INOUTCOME", None, ""])
+@pytest.mark.parametrize("field", ["uid", "IS_DEL", "DO_TYPE", "WDATE", "ZCONTENT = 'x', IS_DEL", "1; DROP TABLE INOUTCOME", None, ""])
 def test_edit_disallowed_field_is_rejected(client, field):
     before = db_row(client, "t1")["IS_DEL"]
     r = patch(client, "/api/transactions/t1", field=field, value="9")
     assert r.status_code == 400
     assert db_row(client, "t1")["IS_DEL"] == before
     assert db_rows("SELECT COUNT(*) AS n FROM INOUTCOME")[0]["n"] == 6
+
+
+def test_page_edits_bump_the_last_write_time(client):
+    patch(client, "/api/transactions/t1", field="ZCONTENT", value="x")
+    patch(client, "/api/transactions/t2/datetime", date="2024-02-12", time="10:00")
+    patch(client, "/api/transactions/bulk", field="ZDATA", value="y", uids=["t3"])
+    assert all(db_row(client, u)["UTIME"] > 1000 for u in ("t1", "t2", "t3"))
+    assert db_row(client, "t4")["UTIME"] == 3
 
 
 def test_edit_value_is_bound_not_interpolated(client):
@@ -199,6 +208,36 @@ def test_add_transfer_rejects_bad_destination(client, over):
 
 
 # -- backups on first write -----------------------------------------------------
+
+def delete(client, uid):
+    return client.delete(f"/api/transactions/{uid}", headers=client.csrf)
+
+
+def test_delete_is_soft(client):
+    r = delete(client, "t1")
+    assert r.status_code == 200 and r.get_json()["deleted"] == ["t1"]
+    assert db_row(client, "t1")["IS_DEL"] == 1 and db_row(client, "t1")["UTIME"] > 1000
+    assert db_row(client, "t2")["IS_DEL"] == 0
+    assert db_rows("SELECT COUNT(*) AS n FROM INOUTCOME")[0]["n"] == 6  # rows stay
+
+
+def test_delete_transfer_takes_its_other_leg(client):
+    mmbak.add_tx(dbstore.store_for("alice").db_path, "x3", do_type="3", asset="a1", txUidTrans="tr")
+    mmbak.add_tx(dbstore.store_for("alice").db_path, "x4", do_type="4", asset="a2", txUidTrans="tr")
+    assert delete(client, "x3").get_json()["deleted"] == ["x3", "x4"]
+    assert db_row(client, "t1")["IS_DEL"] == 0
+
+
+def test_delete_unknown_uid_changes_nothing(client):
+    r = delete(client, "nope")
+    assert r.status_code == 404 and not r.get_json()["ok"]
+    assert db_rows("SELECT COUNT(*) AS n FROM INOUTCOME WHERE IS_DEL = 1")[0]["n"] == 1  # just the seeded t5
+
+
+def test_delete_needs_csrf(client):
+    assert client.delete("/api/transactions/t1").status_code == 400
+    assert db_row(client, "t1")["IS_DEL"] == 0
+
 
 def test_first_write_takes_one_backup(client):
     store = dbstore.store_for("alice")

@@ -57,6 +57,9 @@ file alongside. A snapshot that changes nothing is applied right away.
   unedited working db or re-downloads the installed Drive file; failing
   both, the merge is two-way (every differing row is a conflict).
 - `Store.unsynced()`: the working db has changes the app (Drive) lacks.
+- Columns that hold one value between them (`merge.COLUMN_GROUPS`:
+  `WDATE` + `ZDATE`) merge as a unit: both come from the same side, and a
+  conflict covers the whole group.
 
 ## OAuth
 

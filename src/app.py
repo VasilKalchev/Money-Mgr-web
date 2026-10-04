@@ -2,10 +2,12 @@ import hmac
 import io
 import ipaddress
 import itertools
+import math
 import os
 import secrets
 import sqlite3
 import sys
+import tomllib
 import uuid
 from datetime import datetime, timedelta
 
@@ -36,6 +38,23 @@ app.config.update(
 TRUSTED_PROXIES = [ipaddress.ip_network(x.strip(), strict=False)
                    for x in os.environ.get("MMW_TRUSTED_PROXIES", "").split(",") if x.strip()]
 AUTH_HEADER = os.environ.get("MMW_AUTH_HEADER", "").strip()
+
+
+def _app_version():
+    """The release tag the image was built from (MMW_VERSION). A local run, or
+    an image built without one, shows pyproject's version marked as a dev build."""
+    v = os.environ.get("MMW_VERSION", "").strip()
+    if v and v != "dev":
+        return v
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "..", "pyproject.toml"), "rb") as f:
+            return tomllib.load(f)["project"]["version"] + "-dev"
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        return "dev"
+
+
+VERSION = _app_version()
+app.jinja_env.globals["app_version"] = VERSION
 if AUTH_HEADER and not TRUSTED_PROXIES:
     print(f"MMW_AUTH_HEADER={AUTH_HEADER} is ignored: set MMW_TRUSTED_PROXIES to the proxy's address.", file=sys.stderr)
 
@@ -1366,7 +1385,7 @@ def categories():
 # Routes - inline-edit API
 # ---------------------------------------------------------------------------
 
-TRANSACTION_FIELDS = {"WDATE", "AMOUNT_ACCOUNT", "ZCONTENT", "ZDATA", "ctgUid", "assetUid"}
+TRANSACTION_FIELDS = {"AMOUNT_ACCOUNT", "ZCONTENT", "ZDATA", "ctgUid", "assetUid"}
 ACCOUNT_FIELDS = {"NIC_NAME", "groupUid", "ORDERSEQ", "ZDATA"}
 CATEGORY_FIELDS = {"NAME", "ORDERSEQ"}
 BULK_TRANSACTION_FIELDS = {"ZCONTENT", "ZDATA", "ctgUid", "assetUid"}
@@ -1416,6 +1435,38 @@ def _check_category(uid, tree):
         raise ApiError("unknown category for this type")
 
 
+def _amount_arg(value, name="amount", allow_zero=False):
+    """A finite amount from the request: more than 0, or 0 or more."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ApiError(f"invalid {name}")
+    if not math.isfinite(v):
+        raise ApiError(f"invalid {name}")
+    if v < 0 or (v == 0 and not allow_zero):
+        raise ApiError(f"{name} must " + ("not be negative" if allow_zero else "be positive"))
+    return v
+
+
+def _currency_uid(code):
+    """A currency's uid from its ISO code (as transactions show it) or its uid."""
+    if not isinstance(code, str) or not code:
+        raise ApiError("unknown currency")
+    found = {r["uid"] for r in query("SELECT uid FROM CURRENCY WHERE ISO = ? OR uid = ?", (code, code))}
+    if len(found) != 1:
+        raise ApiError(f"{code} matches more than one currency; give its uid" if found else "unknown currency")
+    return found.pop()
+
+
+def _currency_rate(uid):
+    """CURRENCY.RATE, the currency's rate to the main currency (1 if unknown)."""
+    rows = query("SELECT RATE FROM CURRENCY WHERE uid = ?", (uid,))
+    try:
+        return float(rows[0]["RATE"]) if rows else 1.0
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def _create_transaction(data):
     """Insert a transaction (two linked rows for a transfer) from the add
     form's fields and return its uid."""
@@ -1439,12 +1490,17 @@ def _create_transaction(data):
             raise ApiError("unknown destination account")
         to_currency_uid = to_account_rows[0]["currencyUid"]
 
-    try:
-        amount = float(data.get("amount", ""))
-    except (TypeError, ValueError):
-        raise ApiError("invalid amount")
-    if amount <= 0:
-        raise ApiError("amount must be positive")
+    amount = _amount_arg(data.get("amount", ""))
+    # What was typed in, when it differs from the amount in the account's
+    # currency; without it, the amount itself.
+    entered_amount, entered_currency_uid = amount, currency_uid
+    if "entered_amount" in data or "entered_currency" in data:
+        if not ("entered_amount" in data and "entered_currency" in data):
+            raise ApiError("give entered_amount and entered_currency together")
+        entered_amount = _amount_arg(data["entered_amount"], "entered_amount")
+        entered_currency_uid = _currency_uid(data["entered_currency"])
+    if "to_amount" in data and not is_transfer:
+        raise ApiError("to_amount is only for transfers")
 
     date_str = data.get("date", "")
     dt = _parse_datetime(date_str, data.get("time", ""))
@@ -1463,24 +1519,20 @@ def _create_transaction(data):
     if not isinstance(note, str) or not isinstance(description, str):
         raise ApiError("note and description must be text")
 
-    def currency_rate(uid_):
-        rate_rows = query("SELECT RATE FROM CURRENCY WHERE uid = ?", (uid_,))
-        try:
-            return float(rate_rows[0]["RATE"]) if rate_rows else 1.0
-        except (TypeError, ValueError):
-            return 1.0
-
-    rate = currency_rate(currency_uid)
+    rate = _currency_rate(currency_uid)
     now_ms = int(datetime.now().timestamp() * 1000)
     zdate = str(int(dt.timestamp() * 1000))
     uid = str(uuid.uuid4())
 
     if is_transfer:
-        to_rate = currency_rate(to_currency_uid)
-        # amount is entered in the source account's currency; convert to the
-        # destination account's currency via each currency's rate to the
-        # shared base currency (see CURRENCY.RATE elsewhere in this file).
-        to_amount = round(amount * rate / to_rate, 2) if to_rate else amount
+        to_rate = _currency_rate(to_currency_uid)
+        if "to_amount" in data:
+            to_amount = _amount_arg(data["to_amount"], "to_amount")
+        else:
+            # amount is in the source account's currency; convert to the
+            # destination account's currency via each currency's rate to the
+            # shared base currency.
+            to_amount = round(amount * rate / to_rate, 2) if to_rate else amount
         mirror_uid = str(uuid.uuid4())
         tx_uid_trans = str(uuid.uuid4())
         execute(
@@ -1493,8 +1545,8 @@ def _create_transaction(data):
                 (?, ?, ?, '3', ?, ?, ?, ?, ?, ?, ?, ?, '', ?, '', 0, '0', 0, 0, 0, ?),
                 (?, ?, ?, '4', ?, ?, ?, ?, ?, ?, ?, ?, '', ?, '', 0, '0', 0, 0, 0, ?)
             """,
-            (uid, date_str, zdate, note, description, amount, amount, round(amount * rate, 2),
-             account_uid, to_account_uid, currency_uid, tx_uid_trans, now_ms,
+            (uid, date_str, zdate, note, description, amount, entered_amount, round(amount * rate, 2),
+             account_uid, to_account_uid, entered_currency_uid, tx_uid_trans, now_ms,
              mirror_uid, date_str, zdate, note, description, to_amount, to_amount, round(to_amount * to_rate, 2),
              to_account_uid, account_uid, to_currency_uid, tx_uid_trans, now_ms),
         )
@@ -1509,8 +1561,8 @@ def _create_transaction(data):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, '', '', 0, '0', 0, 0, 0, ?)
         """,
         (uid, date_str, zdate, do_type, note, description,
-         amount, amount, round(amount * rate, 2),
-         account_uid, currency_uid, category_uid, now_ms),
+         amount, entered_amount, round(amount * rate, 2),
+         account_uid, entered_currency_uid, category_uid, now_ms),
     )
     return uid
 
@@ -1529,7 +1581,7 @@ def api_edit_transaction(uid):
         return jsonify(ok=False, error="field not allowed"), 400
     if field == "AMOUNT_ACCOUNT":
         return _edit_transaction_amount(uid, value)
-    execute(f"UPDATE INOUTCOME SET {field} = ? WHERE uid = ?", (value, uid))
+    _update_row("INOUTCOME", uid, {field: value, "UTIME": _now_ms()})
     return jsonify(ok=True, mtime=current_db_mtime())
 
 
@@ -1592,6 +1644,11 @@ def _edit_transaction_amount(uid, value):
     return jsonify(ok=True, mtime=current_db_mtime(), in_zmoney=cols.get("IN_ZMONEY"), zmoney=cols["ZMONEY"])
 
 
+@app.route("/api/transactions/<uid>", methods=["DELETE"])
+def api_delete_transaction(uid):
+    return jsonify(ok=True, deleted=_soft_delete_transaction(uid), mtime=current_db_mtime())
+
+
 @app.route("/api/transactions/bulk", methods=["PATCH"])
 def api_bulk_edit_transactions():
     data = request.get_json(force=True)
@@ -1605,7 +1662,8 @@ def api_bulk_edit_transactions():
     con = get_db(readonly=False)
     try:
         placeholders = ",".join("?" for _ in uids)
-        con.execute(f"UPDATE INOUTCOME SET {field} = ? WHERE uid IN ({placeholders})", [value] + uids)
+        con.execute(f"UPDATE INOUTCOME SET {field} = ?, UTIME = ? WHERE uid IN ({placeholders})",
+                    [value, _now_ms()] + uids)
         con.commit()
     finally:
         con.close()
@@ -1624,7 +1682,7 @@ def api_edit_transaction_datetime(uid):
     except ValueError:
         return jsonify(ok=False, error="bad date/time"), 400
     zdate = str(int(dt.timestamp() * 1000))
-    execute("UPDATE INOUTCOME SET WDATE = ?, ZDATE = ? WHERE uid = ?", (date_str, zdate, uid))
+    _update_row("INOUTCOME", uid, {"WDATE": date_str, "ZDATE": zdate, "UTIME": _now_ms()})
     return jsonify(ok=True, mtime=current_db_mtime())
 
 
@@ -1658,7 +1716,11 @@ TX_TYPE_NAMES = {
 }
 TX_TYPE_CODES = {name: code for code, name in TX_TYPE_NAMES.items()}
 ACCOUNT_STATUS_NAMES = {"0": "normal", "1": "deleted", "3": "hidden"}
-V1_PATCH_FIELDS = {"date", "time", "amount", "note", "description", "category", "account"}
+V1_PATCH_FIELDS = {"date", "time", "amount", "note", "description", "category", "account", "type",
+                   "entered_amount", "entered_currency", "to_amount"}
+# Type changes PATCH allows: they keep the row's shape (an adjustment stays an
+# adjustment, a categorised row stays categorised).
+V1_TYPE_SWAPS = ({"0", "1"}, {"7", "8"})
 
 _V1_TX_SQL = """
     SELECT i.uid, i.WDATE, i.ZDATE, i.DO_TYPE, i.IS_DEL, i.AMOUNT_ACCOUNT, i.IN_ZMONEY,
@@ -1740,6 +1802,21 @@ def _v1_get_transaction(uid):
     return _v1_transaction(rows[0], _category_lookups())
 
 
+def _time_zone():
+    """The server's local time zone, which dates and times are in: its IANA
+    name where it can be found (TZ, else /etc/localtime's target), else the
+    abbreviation, and the current offset from UTC."""
+    now = datetime.now().astimezone()
+    name = os.environ.get("TZ", "").lstrip(":")
+    if not name:
+        try:
+            target = os.path.realpath("/etc/localtime")
+            name = target.split("zoneinfo/", 1)[1] if "zoneinfo/" in target else ""
+        except OSError:
+            name = ""
+    return {"name": name or now.tzname(), "utc_offset_minutes": int(now.utcoffset().total_seconds() // 60)}
+
+
 @app.route("/api/v1/status")
 def v1_status():
     store = current_store()
@@ -1747,6 +1824,7 @@ def v1_status():
         ok=True, user=g.user, auth="token" if g.token else "proxy" if g.via_proxy else "session",
         can_write=bool(g.token["write"]) if g.token else True,
         database={"name": store.db_info().get("name"), "mtime": current_db_mtime()} if store.db_exists() else None,
+        time_zone=_time_zone(),
     )
 
 
@@ -1784,6 +1862,10 @@ def v1_transactions():
     limit/offset paging."""
     f = parse_transaction_filters(request.args)
     where, params = f["build_where"]()
+    updated_since = _int_arg("updated_since", None, 0)
+    if updated_since is not None:
+        where += " AND CAST(i.UTIME AS INTEGER) >= ?"
+        params.append(updated_since)
     limit = _int_arg("limit", 100, 1, 1000)
     offset = _int_arg("offset", 0, 0)
     sort_by = request.args.get("sort", "date")
@@ -1826,19 +1908,33 @@ def v1_add_transaction():
 def v1_edit_transaction(uid):
     """Change any of V1_PATCH_FIELDS in one go. Transfers keep their
     accounts (delete and re-add to move one), and only income and expense
-    rows have a category."""
+    rows have a category. Editing either row of a transfer carries the date,
+    time, note and description over to the other row (the amount: see
+    _transfer_mirror_changes)."""
     data = _json_body()
     unknown = set(data) - V1_PATCH_FIELDS
     if unknown:
         raise ApiError(f"can't change: {', '.join(sorted(unknown))}")
     if not data:
         raise ApiError("nothing to change")
-    rows = query("SELECT DO_TYPE, WDATE, ZDATE, AMOUNT_ACCOUNT FROM INOUTCOME WHERE uid = ?", (uid,))
+    rows = query("SELECT DO_TYPE, WDATE, ZDATE, AMOUNT_ACCOUNT, assetUid, txUidTrans FROM INOUTCOME WHERE uid = ?",
+                 (uid,))
     if not rows:
         raise ApiError("not found", 404)
     row = rows[0]
     do_type = row["DO_TYPE"]
+    is_transfer = do_type in ("3", "4")
     cols = {}
+    if "type" in data:
+        new_type = data["type"]
+        new_type = TX_TYPE_CODES.get(new_type, new_type) if isinstance(new_type, str) else None
+        if new_type != do_type:
+            if {do_type, new_type} not in V1_TYPE_SWAPS:
+                raise ApiError("type can only change between income and expense, "
+                               "or between balance_increase and balance_decrease")
+            if new_type in ("0", "1") and "category" not in data:
+                raise ApiError("changing between income and expense needs a category from the new tree")
+            cols["DO_TYPE"] = do_type = new_type
     for key, col in (("note", "ZCONTENT"), ("description", "ZDATA")):
         if key in data:
             if not isinstance(data[key], str):
@@ -1850,11 +1946,14 @@ def v1_edit_transaction(uid):
         _check_category(data["category"], int(do_type))
         cols["ctgUid"] = data["category"]
     if "account" in data:
-        if do_type in ("3", "4"):
+        if is_transfer:
             raise ApiError("a transfer's accounts can't be changed; delete it and add a new one")
         if not query("SELECT 1 FROM ASSETS WHERE uid = ?", (data["account"],)):
             raise ApiError("unknown account")
         cols["assetUid"] = data["account"]
+    if "to_amount" in data and do_type != "3":
+        raise ApiError("to_amount is for the sending row of a transfer" if do_type == "4"
+                       else "to_amount is only for transfers")
     if "date" in data or "time" in data:
         old_ms = _num_or_none(row["ZDATE"], int)
         old_time = datetime.fromtimestamp(old_ms / 1000).strftime("%H:%M:%S") if old_ms is not None else ""
@@ -1863,8 +1962,52 @@ def v1_edit_transaction(uid):
     if "amount" in data or "account" in data:
         # A new account can mean a new currency rate, so ZMONEY is restated too.
         cols.update(_amount_columns(uid, data.get("amount", row["AMOUNT_ACCOUNT"]), data.get("account")))
-    _update_row("INOUTCOME", uid, {**cols, "UTIME": _now_ms()})
-    return jsonify(ok=True, transaction=_v1_get_transaction(uid))
+    # Given entered values are written as they are, not rescaled with the amount.
+    if "entered_amount" in data:
+        cols["IN_ZMONEY"] = _amount_arg(data["entered_amount"], "entered_amount", allow_zero=True)
+    if "entered_currency" in data:
+        cols["currencyUid"] = _currency_uid(data["entered_currency"])
+
+    mirror_uid, mirror_cols = (_transfer_mirror_changes(uid, row, data, cols) if is_transfer else (None, {}))
+    now = _now_ms()
+    con = get_db(readonly=False)
+    try:
+        for u, c in ((uid, cols), (mirror_uid, mirror_cols)):
+            if u and c:
+                c = {**c, "UTIME": now}
+                con.execute(f"UPDATE INOUTCOME SET {', '.join(f'{k} = ?' for k in c)} WHERE uid = ?", [*c.values(), u])
+        con.commit()
+    finally:
+        con.close()
+    out = {"ok": True, "transaction": _v1_get_transaction(uid)}
+    if mirror_uid:
+        out["mirror"] = _v1_get_transaction(mirror_uid)
+    return jsonify(out)
+
+
+def _transfer_mirror_changes(uid, row, data, cols):
+    """(the other row's uid, its columns to write) for a PATCH of one row of
+    a transfer: the same date, time, note and description, and its amount
+    from to_amount, or the same amount when both accounts share a currency.
+    Across currencies a new amount leaves the other row's alone, so patching
+    both rows gives each the amount asked for. (None, {}) if the other row
+    is missing."""
+    link = row["txUidTrans"]
+    other = query("""SELECT i.uid, a.currencyUid = b.currencyUid AS same_currency
+                     FROM INOUTCOME i
+                     LEFT JOIN ASSETS a ON a.uid = i.assetUid
+                     LEFT JOIN ASSETS b ON b.uid = ?
+                     WHERE i.txUidTrans = ? AND i.uid <> ? AND i.DO_TYPE IN ('3', '4')""",
+                  (row["assetUid"], link, uid)) if link else []
+    if len(other) != 1:
+        return None, {}
+    other_uid = other[0]["uid"]
+    out = {c: cols[c] for c in ("WDATE", "ZDATE", "ZCONTENT", "ZDATA") if c in cols}
+    if "to_amount" in data:
+        out.update(_amount_columns(other_uid, _amount_arg(data["to_amount"], "to_amount", allow_zero=True)))
+    elif "amount" in data and other[0]["same_currency"]:
+        out.update(_amount_columns(other_uid, cols["AMOUNT_ACCOUNT"]))
+    return other_uid, out
 
 
 def _linked_uids(uid):
@@ -1884,16 +2027,21 @@ def _linked_uids(uid):
             list(links) * 2)}
 
 
-@app.route("/api/v1/transactions/<uid>", methods=["DELETE"])
-def v1_delete_transaction(uid):
+def _soft_delete_transaction(uid):
     """Soft-delete (IS_DEL = 1), like the app: the row stays, and sync
-    carries the deletion over. A transfer goes with its other leg and fee."""
+    carries the deletion over. A transfer goes with its other leg and fee.
+    Returns every uid deleted."""
     if not query("SELECT 1 FROM INOUTCOME WHERE uid = ?", (uid,)):
         raise ApiError("not found", 404)
     uids = sorted(_linked_uids(uid))
     marks = ",".join("?" for _ in uids)
     execute(f"UPDATE INOUTCOME SET IS_DEL = 1, UTIME = ? WHERE uid IN ({marks})", [_now_ms(), *uids])
-    return jsonify(ok=True, deleted=uids)
+    return uids
+
+
+@app.route("/api/v1/transactions/<uid>", methods=["DELETE"])
+def v1_delete_transaction(uid):
+    return jsonify(ok=True, deleted=_soft_delete_transaction(uid))
 
 
 if not users.has_users():

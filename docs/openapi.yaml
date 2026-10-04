@@ -32,7 +32,8 @@ info:
 
     Every response is JSON with `"ok": true`, or `"ok": false` and an
     `error` message. Dates are `YYYY-MM-DD` and times `HH:MM:SS`, in the
-    server's local time zone, like the app's own. Amounts are numbers.
+    server's local time zone (`time_zone` in `/status`), like the app's own.
+    Amounts are numbers.
 
     ## Writes and sync
 
@@ -203,6 +204,15 @@ paths:
             Each transfer is stored as two rows; the mirror is the receiving
             side, so it's hidden by default to count each transfer once.
           schema: {type: string, enum: [hide, show, only], default: hide}
+        - name: updated_since
+          in: query
+          description: |
+            Only rows changed at or after this Unix time in milliseconds
+            (`updated_ms`). Every write here sets it. Rows that come in from
+            the app at a sync keep the time they were changed in the app,
+            which can be before the sync, so after a sync (`database.mtime`
+            in `/status` changes) read again from before the previous sync.
+          schema: {type: integer, minimum: 0}
         - name: sort
           in: query
           schema: {type: string, enum: [date, amount, entered_amount, account, updated], default: date}
@@ -242,8 +252,14 @@ paths:
       operationId: addTransaction
       summary: Add a transaction
       description: |
-        A transfer adds two linked rows (the transfer and its mirror) and
-        converts the amount into the destination account's currency.
+        A transfer adds two linked rows (the transfer and its mirror). The
+        mirror's amount is `to_amount`, or else the amount converted into the
+        destination account's currency with the currencies' rates.
+
+        `entered_amount` and `entered_currency` record what was typed in
+        when it differs from the amount in the account's currency (a foreign
+        purchase, or a pre-euro amount restated). Without them the amount is
+        also the entered amount.
       requestBody:
         required: true
         content:
@@ -255,6 +271,9 @@ paths:
                         date: "2026-10-02", time: "13:30", note: lunch}
               transfer:
                 value: {type: transfer, account: "4", to_account: "1", amount: 200}
+              foreign:
+                value: {type: expense, account: "4", amount: 5.11, category: c3,
+                        entered_amount: 10, entered_currency: BGN}
       responses:
         "201":
           description: Added
@@ -290,10 +309,21 @@ paths:
       operationId: editTransaction
       summary: Change one or more fields of a transaction
       description: |
-        Changing the amount or the account restates the entered and
-        main-currency amounts. A transfer's accounts can't be changed
+        Changing the amount or the account restates the main-currency
+        amount, and the entered amount by the same ratio unless
+        `entered_amount` is given. A transfer's accounts can't be changed
         (delete it and add a new one), and only income and expense have a
-        category. Edits apply to this row only, not a transfer's mirror.
+        category.
+
+        `type` changes between `income` and `expense` (with a `category`
+        from the new tree) and between `balance_increase` and
+        `balance_decrease`; the uid stays.
+
+        On either row of a transfer, the date, time, note and description
+        are written to the other row too, and the response has it as
+        `mirror`. The other row's amount follows when both accounts share a
+        currency; across currencies set it with `to_amount` on the sending
+        row (or a PATCH of the mirror).
       requestBody:
         required: true
         content:
@@ -305,7 +335,7 @@ paths:
           description: Changed
           content:
             application/json:
-              schema: {$ref: "#/components/schemas/TransactionResponse"}
+              schema: {$ref: "#/components/schemas/TransactionEditResponse"}
         "400": {$ref: "#/components/responses/BadRequest"}
         "401": {$ref: "#/components/responses/Unauthorized"}
         "403": {$ref: "#/components/responses/ReadOnly"}
@@ -355,7 +385,7 @@ components:
 
     Status:
       type: object
-      required: [ok, user, auth, can_write, database]
+      required: [ok, user, auth, can_write, database, time_zone]
       properties:
         ok: {const: true}
         user: {type: string}
@@ -363,6 +393,17 @@ components:
           type: string
           enum: [token, session, proxy]
         can_write: {type: boolean}
+        time_zone:
+          type: object
+          description: The time zone dates and times are in.
+          required: [name, utc_offset_minutes]
+          properties:
+            name:
+              type: string
+              description: An IANA name such as `Europe/Sofia` where the server has one, else an abbreviation.
+            utc_offset_minutes:
+              type: integer
+              description: The offset from UTC now.
         database:
           oneOf:
             - type: "null"
@@ -493,6 +534,16 @@ components:
         ok: {const: true}
         transaction: {$ref: "#/components/schemas/Transaction"}
 
+    TransactionEditResponse:
+      type: object
+      required: [ok, transaction]
+      properties:
+        ok: {const: true}
+        transaction: {$ref: "#/components/schemas/Transaction"}
+        mirror:
+          $ref: "#/components/schemas/Transaction"
+          description: For a transfer, its other row, after the change.
+
     NewTransaction:
       type: object
       required: [type, account, amount]
@@ -530,6 +581,19 @@ components:
           type: string
           description: Balance adjustments without one get "Difference".
         description: {type: string}
+        entered_amount:
+          description: |
+            More than 0: the amount as typed in, in `entered_currency`. Give
+            both or neither.
+          type: [number, string]
+        entered_currency:
+          type: string
+          description: ISO code (as `entered_currency` in a transaction) or currency uid.
+        to_amount:
+          description: |
+            Transfers only: more than 0, the amount that arrived, in the
+            destination account's currency.
+          type: [number, string]
 
     TransactionChanges:
       type: object
@@ -555,6 +619,22 @@ components:
         account:
           type: string
           description: Not for transfers.
+        type:
+          description: |
+            A name or a code. `income` <-> `expense` (needs `category`) or
+            `balance_increase` <-> `balance_decrease`.
+          type: string
+        entered_amount:
+          description: 0 or more, written as given instead of rescaled with `amount`.
+          type: [number, string]
+        entered_currency:
+          type: string
+          description: ISO code or currency uid.
+        to_amount:
+          description: |
+            On the sending row of a transfer: 0 or more, the mirror's amount,
+            in the destination account's currency.
+          type: [number, string]
 
   responses:
     BadRequest:

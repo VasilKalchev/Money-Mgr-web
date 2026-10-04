@@ -5,6 +5,38 @@ Notable changes to Money Mgr web. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Delete transactions from the Transactions page, one at a time or in bulk
+  with the row checkboxes. Deletes are staged like other edits and written
+  on Save. Like in the app, they are soft-deleted and a transfer goes with
+  its other leg and fee.
+- API: `entered_amount` and `entered_currency` when adding or editing a
+  transaction, written as given (for foreign amounts, or restating pre-euro
+  amounts without losing the exact entered value).
+- API: `to_amount` when adding a transfer, the amount that arrived.
+- API: editing either row of a transfer updates the other row's date, time,
+  note and description (and amount in the same currency, or `to_amount`),
+  and returns it as `mirror`.
+- API: `type` can change between income and expense, and between the two
+  balance adjustments, keeping the transaction's uid.
+- API: `updated_since` filter on the transaction list, and the server's
+  time zone in `/status`.
+
+### Changed
+
+- API: editing a transfer's row no longer leaves its other row's date, time,
+  note and description behind (see above).
+
+### Fixed
+
+- Sync could leave a transaction's date (`WDATE`) and its timestamp
+  (`ZDATE`) days apart, when one side changed the date and the other only
+  the timestamp. The two now merge together: such a change is one conflict
+  over both, and picking a side takes both from it.
+- Edits made in the pages now set the transaction's last-change time, so
+  they show up in `updated_since`.
+
 ## [1.0.0] - 2026-10-02
 
 ### Added

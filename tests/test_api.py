@@ -320,6 +320,106 @@ def test_patch_missing(api):
     assert api.patch("transactions/nope", {"note": "x"}).status_code == 404
 
 
+def test_add_with_entered_amount_and_currency(api):
+    body = {"type": "expense", "account": "a1", "amount": 5.11, "category": "c-fun", "date": "2001-05-06"}
+    t = api.post("transactions", {**body, "entered_amount": 10, "entered_currency": "USD"}).get_json()["transaction"]
+    assert (t["amount"], t["currency"], t["entered_amount"], t["entered_currency"]) == (5.11, "EUR", 10, "USD")
+    t = api.post("transactions", {**body, "entered_amount": 10, "entered_currency": "cur-usd"}).get_json()["transaction"]
+    assert t["entered_currency"] == "USD"  # a uid works too
+    t = api.post("transactions", body).get_json()["transaction"]
+    assert (t["entered_amount"], t["entered_currency"]) == (5.11, "EUR")  # without them: the amount
+
+
+@pytest.mark.parametrize("extra", [
+    {"entered_amount": 10}, {"entered_currency": "USD"}, {"entered_amount": 10, "entered_currency": "XXX"},
+    {"entered_amount": 0, "entered_currency": "USD"}, {"entered_amount": "nan", "entered_currency": "USD"},
+    {"to_amount": 3},
+])
+def test_add_rejects_bad_entered_values(api, extra):
+    body = {"type": "expense", "account": "a1", "amount": 1, "category": "c-fun", **extra}
+    assert api.post("transactions", body).status_code == 400
+    assert count() == 6
+
+
+def test_add_transfer_with_the_amount_that_arrived(api):
+    t = api.post("transactions", {"type": "transfer", "account": "a1", "to_account": "a2", "amount": 100,
+                                  "to_amount": 107.5}).get_json()["transaction"]
+    mirror = api.get("transactions?show_mirror=only&account=a2").get_json()["transactions"]
+    assert [(m["transfer_id"], m["amount"], m["entered_amount"]) for m in mirror] == [(t["transfer_id"], 107.5, 107.5)]
+
+
+def test_patch_entered_values_are_written_as_is(api):
+    # restating a pre-euro row: the entered BGN must stay exact
+    t = api.patch("transactions/t1", {"amount": 5.11, "entered_amount": 10, "entered_currency": "USD"}).get_json()["transaction"]
+    assert (t["amount"], t["entered_amount"], t["entered_currency"]) == (5.11, 10, "USD")
+    t = api.patch("transactions/t1", {"entered_amount": 9.99}).get_json()["transaction"]
+    assert (t["amount"], t["entered_amount"], t["entered_currency"]) == (5.11, 9.99, "USD")
+    # the amount alone still rescales what was entered
+    t = api.patch("transactions/t2", {"amount": 51}).get_json()["transaction"]
+    assert t["entered_amount"] == 51
+    assert api.patch("transactions/t1", {"entered_currency": "XXX"}).status_code == 400
+
+
+def test_patch_type_between_income_and_expense_and_between_adjustments(api):
+    t = api.patch("transactions/t1", {"type": "income", "category": "c-salary"}).get_json()["transaction"]
+    assert (t["uid"], t["type"], t["category_uid"]) == ("t1", "income", "c-salary")
+    assert row("t1")["DO_TYPE"] == "0"
+    adj = api.post("transactions", {"type": "balance_increase", "account": "a1", "amount": 1}).get_json()["transaction"]
+    t = api.patch(f"transactions/{adj['uid']}", {"type": "8"}).get_json()["transaction"]
+    assert (t["type"], t["category_uid"]) == ("balance_decrease", "-4")
+    assert api.patch("transactions/t2", {"type": "expense", "note": "same type is fine"}).status_code == 200
+
+
+@pytest.mark.parametrize("body", [
+    {"type": "income"},  # needs a category from the income tree
+    {"type": "income", "category": "c-fun"},  # an expense category
+    {"type": "transfer"}, {"type": "balance_increase"}, {"type": "gift"}, {"type": 1},
+])
+def test_patch_type_rejects(api, body):
+    before = dict(row("t1"))
+    assert api.patch("transactions/t1", body).status_code == 400
+    assert dict(row("t1")) == before
+
+
+def test_patch_transfer_carries_over_to_its_other_row(api):
+    mmbak.execute(db_path(), "INSERT INTO ASSETS (NIC_NAME, ORDERSEQ, ZDATA, uid, currencyUid, groupUid) "
+                             "VALUES ('Savings', 3, '0', 'a3', 'cur-eur', 'g1')")
+    same = api.post("transactions", {"type": "transfer", "account": "a1", "to_account": "a3", "amount": 20}).get_json()["transaction"]
+    r = api.patch(f"transactions/{same['uid']}", {"amount": 25, "note": "rent", "date": "2025-03-04", "time": "09:00"}).get_json()
+    m = r["mirror"]
+    assert (m["type"], m["transfer_id"], m["account_uid"]) == ("transfer_mirror", same["transfer_id"], "a3")
+    assert (m["amount"], m["note"], m["date"], m["time"]) == (25, "rent", "2025-03-04", "09:00:00")
+    # and the other way round, from the mirror
+    m = api.patch(f"transactions/{m['uid']}", {"description": "d"}).get_json()["mirror"]
+    assert (m["uid"], m["description"]) == (same["uid"], "d")
+
+    cross = api.post("transactions", {"type": "transfer", "account": "a1", "to_account": "a2", "amount": 10,
+                                      "to_amount": 11}).get_json()["transaction"]
+    m = api.patch(f"transactions/{cross['uid']}", {"amount": 12}).get_json()["mirror"]
+    assert m["amount"] == 11  # another currency: its amount is left alone
+    m = api.patch(f"transactions/{cross['uid']}", {"to_amount": 13.2}).get_json()["mirror"]
+    assert m["amount"] == 13.2
+    assert api.patch(f"transactions/{m['uid']}", {"to_amount": 1}).status_code == 400  # not on the mirror
+    assert api.patch("transactions/t1", {"to_amount": 1}).status_code == 400
+    assert "mirror" not in api.patch("transactions/t1", {"note": "x"}).get_json()
+
+
+def test_list_updated_since(api):
+    assert api.get("transactions?updated_since=0").get_json()["total"] == 4
+    since = int(datetime.now().timestamp() * 1000)
+    api.patch("transactions/t2", {"note": "changed"})
+    d = api.get(f"transactions?updated_since={since}").get_json()
+    assert [t["uid"] for t in d["transactions"]] == ["t2"] and d["total"] == 1
+    assert api.get("transactions?updated_since=x").status_code == 400
+
+
+def test_status_has_the_time_zone(api, monkeypatch):
+    tz = api.get("status").get_json()["time_zone"]
+    assert tz["name"] and isinstance(tz["utc_offset_minutes"], int)
+    monkeypatch.setenv("TZ", "Europe/Sofia")
+    assert api.get("status").get_json()["time_zone"]["name"] == "Europe/Sofia"
+
+
 def test_delete_is_soft(api):
     r = api.delete("transactions/t1")
     assert r.get_json() == {"ok": True, "deleted": ["t1"]}
